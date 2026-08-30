@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ระบบบันทึกการเติมน้ำมันจากรถน้ำมัน</title>
+<!--
+  LIFF frontend ไฟล์เดียว — host บน GitHub Pages (แบบเดียวกับระบบขอย้ายเครื่องจักร)
+  เรียก Apps Script Web App ผ่าน JSONP (อ่าน+เขียน) / hidden-iframe form POST (เฉพาะ submitFill ที่มีรูปใหญ่)
+  ดูเหตุผลทางเทคนิคในคอมเมนต์หัวไฟล์ Code.gs
+-->
+<style>
+  :root {
+    --c-primary: #0a6e3c;   /* เขียวน้ำมัน */
+    --c-primary-dark: #08562f;
+    --c-accent: #f39c12;
+    --c-danger: #c0392b;
+    --c-bg: #f2f4f3;
+    --c-card: #ffffff;
+    --c-text: #1c2b24;
+    --c-muted: #6b7a72;
+    --c-border: #dde4e0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans Thai', 'Sarabun', sans-serif;
+    background: var(--c-bg); color: var(--c-text); font-size: 16px; padding-bottom: 90px;
+  }
+  header {
+    background: var(--c-primary); color: #fff; padding: 12px 16px;
+    position: sticky; top: 0; z-index: 50; display: flex; justify-content: space-between; align-items: center;
+  }
+  header h1 { font-size: 17px; font-weight: 600; }
+  header .who { font-size: 12px; opacity: .9; text-align: right; }
+  .banner-test { background: #b03a2e; color: #fff; text-align: center; padding: 6px; font-size: 13px; }
+  .banner-stale { background: #f39c12; color: #fff; text-align: center; padding: 6px; font-size: 13px; }
+  main { padding: 12px; max-width: 860px; margin: 0 auto; }
+  .card {
+    background: var(--c-card); border: 1px solid var(--c-border); border-radius: 12px;
+    padding: 14px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  }
+  .card h3 { font-size: 15px; margin-bottom: 8px; }
+  .row { font-size: 14px; margin: 3px 0; color: var(--c-text); }
+  .row b { font-weight: 600; }
+  .muted { color: var(--c-muted); font-size: 13px; }
+  .status-chip {
+    display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px;
+    background: #e8f2ec; color: var(--c-primary-dark); font-weight: 600;
+  }
+  .status-chip.warn { background: #fdf0dc; color: #9a6a08; }
+  .status-chip.danger { background: #fbe4e0; color: var(--c-danger); }
+  .flag { display:inline-block; background:#fbe4e0; color:var(--c-danger); border-radius:6px; padding:1px 8px; font-size:12px; margin:2px 4px 2px 0; }
+  button {
+    font-family: inherit; font-size: 15px; border: none; border-radius: 10px;
+    padding: 12px 16px; cursor: pointer; font-weight: 600;
+  }
+  .btn-primary { background: var(--c-primary); color: #fff; width: 100%; margin-top: 10px; }
+  .btn-primary:active { background: var(--c-primary-dark); }
+  .btn-secondary { background: #e8ede9; color: var(--c-text); width: 100%; margin-top: 8px; }
+  .btn-danger { background: #fbe4e0; color: var(--c-danger); width: 100%; margin-top: 8px; }
+  .btn-small { padding: 8px 12px; font-size: 13px; width: auto; margin: 4px 4px 0 0; }
+  button:disabled { opacity: .5; cursor: default; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; color: var(--c-text); }
+  label .opt { font-weight: 400; color: var(--c-muted); }
+  input, select, textarea {
+    width: 100%; font-family: inherit; font-size: 16px; padding: 11px 12px;
+    border: 1px solid var(--c-border); border-radius: 10px; background: #fff;
+  }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--c-primary); border-color: transparent; }
+  input[readonly] { background: #eef1ef; color: var(--c-muted); }
+  .hint { font-size: 12px; color: var(--c-muted); margin-top: 3px; }
+  .hint.error { color: var(--c-danger); font-weight: 600; }
+  .calcbox { background:#e8f2ec; border-radius:10px; padding:10px 12px; margin-top:10px; font-size:14px; }
+  .calcbox .big { font-size:18px; font-weight:700; }
+  .calcbox .neg { color: var(--c-danger); }
+  nav {
+    position: fixed; bottom: 0; left: 0; right: 0; background: #fff;
+    border-top: 1px solid var(--c-border); display: flex; z-index: 50;
+  }
+  nav button {
+    flex: 1; background: none; border-radius: 0; padding: 8px 2px 10px; font-size: 11px;
+    color: var(--c-muted); font-weight: 500; display:flex; flex-direction:column; align-items:center; gap:2px;
+  }
+  nav button .ico { font-size: 20px; }
+  nav button.active { color: var(--c-primary); font-weight: 700; }
+  .toast {
+    position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+    background: rgba(28,43,36,.95); color: #fff; padding: 10px 18px; border-radius: 10px;
+    font-size: 14px; z-index: 99; display: none; max-width: 90%; text-align: center;
+  }
+  .spinner {
+    display: none; position: fixed; inset: 0; background: rgba(255,255,255,.6);
+    z-index: 98; align-items: center; justify-content: center;
+  }
+  .spinner div {
+    width: 42px; height: 42px; border: 4px solid var(--c-border); border-top-color: var(--c-primary);
+    border-radius: 50%; animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border-bottom: 1px solid var(--c-border); padding: 7px 6px; text-align: left; vertical-align: top; }
+  th { background: #eef3f0; font-weight: 600; white-space: nowrap; }
+  .tablewrap { overflow-x: auto; }
+  .photo-preview { max-width: 130px; border-radius: 8px; margin-top: 6px; display: block; }
+  .tabbar { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+  .tabbar button { background:#e8ede9; color:var(--c-text); padding:8px 14px; font-size:13px; border-radius:999px; }
+  .tabbar button.active { background:var(--c-primary); color:#fff; }
+  .empty { text-align:center; color:var(--c-muted); padding:28px 10px; font-size:14px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 10px; }
+  @media (max-width:480px){ .grid2{ grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<div id="banner-test" class="banner-test" style="display:none">⚠️ โหมดทดสอบ — แจ้งเตือนทั้งหมดส่งเข้าแชทผู้ดูแลระบบ</div>
+<div id="banner-stale" class="banner-stale" style="display:none">⚠️ ข้อมูลทะเบียนเครื่องจักร/หน้างานยังไม่ได้ sync เกิน 48 ชม. — แจ้งผู้ดูแลตรวจสคริปต์เซิร์ฟเวอร์</div>
+
+<header>
+  <h1>⛽ บันทึกการเติมน้ำมัน</h1>
+  <div class="who" id="who"></div>
+</header>
+
+<main id="main"><div class="empty">กำลังโหลด…</div></main>
+
+<nav id="nav" style="display:none"></nav>
+<div class="toast" id="toast"></div>
+<div class="spinner" id="spinner"><div></div></div>
+
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script>
+/* ================================ ค่าตั้งต้น ================================ */
+// TODO: ใส่ค่าจริงหลัง deploy (ดู README-setup.md)
+var LIFF_ID = 'YOUR_LIFF_ID';
+var API_URL = 'https://script.google.com/macros/s/AKfycbzShJ2KgmFbjA64tk7KqoNFkSMC4pcq8btuiPuKx6v6k1luNs7ILVR1UFIpt0G3iE1_/exec';
+// เปิดทดสอบบนเบราว์เซอร์ปกติโดยไม่ผ่าน LINE: ?dev=LINE_USER_ID_ที่ลงทะเบียนไว้
+var DEV_USER_ID = new URLSearchParams(location.search).get('dev');
+
+var CURRENT_USER = null; // {userId, name, roles:[...], defaultTank}
+var MASTERS = { machines: [], sites: [], fuels: [], tanks: [], receivers: [] };
+var ROLES = { DRIVER: 'คนขับรถน้ำมัน', CLERK1: 'เสมียน1', CLERK2: 'เสมียน2', ADMIN: 'ผู้ดูแล' };
+
+/* ================================ JSONP / POST bridge (pattern ระบบขอย้ายฯ) ================================ */
+var jsonpCounter = 0;
+function jsonpRequest(qs) {
+  return new Promise(function (resolve, reject) {
+    var cbName = '__jsonp_cb_' + (++jsonpCounter) + '_' + Date.now();
+    var script = document.createElement('script');
+    var timer = setTimeout(function () { cleanup(); reject(new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ (หมดเวลา)')); }, 45000);
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }
+    window[cbName] = function (result) { cleanup(); resolve(result); };
+    script.onerror = function () { cleanup(); reject(new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้')); };
+    script.src = API_URL + '?' + qs + '&callback=' + cbName;
+    document.body.appendChild(script);
+  });
+}
+function formPostRequest(fields) {
+  return new Promise(function (resolve, reject) {
+    var iframeName = '__post_frame_' + Date.now();
+    var iframe = document.createElement('iframe');
+    iframe.name = iframeName; iframe.style.display = 'none';
+    var form = document.createElement('form');
+    form.method = 'POST'; form.action = API_URL; form.target = iframeName; form.style.display = 'none';
+    fields.viaForm = '1';
+    Object.keys(fields).forEach(function (k) {
+      var input = document.createElement('input');
+      input.type = 'hidden'; input.name = k;
+      input.value = fields[k] == null ? '' : fields[k];
+      form.appendChild(input);
+    });
+    var timer = setTimeout(function () { cleanup(); reject(new Error('ส่งข้อมูลไม่สำเร็จ (หมดเวลา) — ลองใหม่ หรือเช็คในประวัติว่าบันทึกไปแล้วหรือยัง')); }, 60000);
+    function onMsg(ev) {
+      if (!ev.data || typeof ev.data.ok === 'undefined') return;
+      cleanup(); resolve(ev.data);
+    }
+    function cleanup() {
+      clearTimeout(timer);
+      window.removeEventListener('message', onMsg);
+      setTimeout(function () {
+        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        if (form.parentNode) form.parentNode.removeChild(form);
+      }, 500);
+    }
+    window.addEventListener('message', onMsg);
+    document.body.appendChild(iframe);
+    document.body.appendChild(form);
+    form.submit();
+  });
+}
+
+var GET_ACTION_ARGS = {
+  whoAmI: ['userId'],
+  machineList: [], siteList: [], fuelList: [], tankList: [], receiverList: [],
+  lastRemaining: ['tank'],
+  myOrders: ['userId'], myOrderHistory: ['userId'],
+  pendingIssue: ['userId'], activeOrders: ['userId'], orderHistory: ['userId'],
+  fillsOfOrder: ['userId', 'orderId'],
+  pendingReview: ['userId'], importedPendingAudit: ['userId'], importFailed: ['userId'],
+  dashboard: ['userId'],
+  requestOrder: ['userId', 'payload'],
+  cancelOrder: ['userId', 'orderId', 'reason'],
+  issueOrder: ['userId', 'orderId', 'patch'],
+  recordLoad: ['userId', 'orderId', 'payload'],
+  cancelFill: ['userId', 'fillId', 'reason'],
+  editFill: ['userId', 'fillId', 'patch'],
+  submitEndOfDay: ['userId', 'orderId', 'payload'],
+  approveDailyReport: ['userId', 'orderId'],
+  rejectDailyReport: ['userId', 'orderId', 'reason'],
+  auditFills: ['userId', 'fillIds'],
+  retryImport: ['userId', 'fillId']
+};
+// submitFill มีรูปแนบ — ลอง JSONP ก่อนถ้าสั้นพอ ไม่งั้น hidden-iframe form (pattern markMoved เดิม)
+var POST_ACTION_ARGS = { submitFill: ['userId', 'payload', 'photo'] };
+
+function callServer(fnName) {
+  var args = Array.prototype.slice.call(arguments, 1);
+  function buildQs(keys) {
+    var qs = 'action=' + fnName;
+    keys.forEach(function (k, i) {
+      var v = args[i];
+      if (v != null && typeof v === 'object') v = JSON.stringify(v);
+      qs += '&' + k + '=' + encodeURIComponent(v == null ? '' : v);
+    });
+    return qs;
+  }
+  function unwrap(result) {
+    if (!result.ok) throw new Error(result.error || 'เกิดข้อผิดพลาดไม่ทราบสาเหตุ');
+    return result.data;
+  }
+  if (GET_ACTION_ARGS.hasOwnProperty(fnName)) {
+    return jsonpRequest(buildQs(GET_ACTION_ARGS[fnName])).then(unwrap);
+  }
+  if (POST_ACTION_ARGS.hasOwnProperty(fnName)) {
+    var keys = POST_ACTION_ARGS[fnName];
+    var qs = buildQs(keys);
+    if (qs.length < 6000) return jsonpRequest(qs).then(unwrap);
+    var fields = { action: fnName };
+    keys.forEach(function (k, i) {
+      var v = args[i];
+      if (v != null && typeof v === 'object') v = JSON.stringify(v);
+      fields[k] = v == null ? '' : v;
+    });
+    return formPostRequest(fields).then(unwrap);
+  }
+  return Promise.reject(new Error('ไม่รู้จักฟังก์ชัน: ' + fnName));
+}
+
+/* ================================ UI helpers ================================ */
+function $(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function showToast(msg) {
+  var el = $('toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(window.__toastTimer);
+  window.__toastTimer = setTimeout(function () { el.style.display = 'none'; }, 3500);
+}
+function busy(on) { $('spinner').style.display = on ? 'flex' : 'none'; }
+function statusChip(status) {
+  var cls = '';
+  if (/รอ|กำลัง/.test(status)) cls = 'warn';
+  if (/ยกเลิก|ไม่สำเร็จ/.test(status)) cls = 'danger';
+  return '<span class="status-chip ' + cls + '">' + esc(status) + '</span>';
+}
+function flagsHtml(flagsStr) {
+  if (!flagsStr) return '';
+  return String(flagsStr).split(',').filter(Boolean)
+    .map(function (f) { return '<span class="flag">🚩 ' + esc(f) + '</span>'; }).join('');
+}
+function num(v) { var n = parseFloat(String(v == null ? '' : v).replace(/,/g, '')); return isNaN(n) ? null : n; }
+
+/* ================================ init ================================ */
+function init() {
+  var boot;
+  if (DEV_USER_ID) {
+    boot = Promise.resolve(DEV_USER_ID);
+  } else {
+    boot = liff.init({ liffId: LIFF_ID }).then(function () {
+      if (!liff.isLoggedIn()) { liff.login(); return new Promise(function () {}); }
+      return liff.getProfile().then(function (p) { return p.userId; });
+    });
+  }
+  boot.then(function (userId) {
+    return callServer('whoAmI', userId).then(function (me) {
+      if (me.testMode) $('banner-test').style.display = 'block';
+      if (!me.registered) { renderNotRegistered(userId); return; }
+      if (!me.active) {
+        $('main').innerHTML = '<div class="card"><h3>บัญชีถูกปิดใช้งาน</h3><div class="muted">กรุณาติดต่อเสมียน 1 หรือผู้ดูแลระบบ</div></div>';
+        return;
+      }
+      CURRENT_USER = { userId: userId, name: me.name, roles: me.roles, defaultTank: me.defaultTank || '' };
+      $('who').innerHTML = esc(me.name) + '<br>' + esc(me.roles.join(', '));
+      buildNav();
+      loadMasters();
+      navigate(defaultView());
+    });
+  }).catch(function (err) {
+    $('main').innerHTML = '<div class="card"><h3>เข้าระบบไม่ได้</h3><div class="muted">' + esc(err.message) + '</div>' +
+      '<button class="btn-secondary" onclick="location.reload()">ลองใหม่</button></div>';
+  });
+}
+
+function renderNotRegistered(userId) {
+  $('main').innerHTML =
+    '<div class="card"><h3>ยังไม่ได้ลงทะเบียนผู้ใช้งาน</h3>' +
+    '<div class="row">ส่งรหัสด้านล่างให้เสมียน 1 เพื่อเพิ่มสิทธิ์ในแท็บ "สิทธิ์ผู้ใช้งาน"</div>' +
+    '<input readonly value="' + esc(userId) + '" id="reg-id" style="margin-top:8px">' +
+    '<button class="btn-primary" onclick="copyRegId()">📋 คัดลอกรหัส</button></div>';
+}
+function copyRegId() {
+  var v = $('reg-id').value;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(v).then(function () { showToast('คัดลอกแล้ว'); });
+  } else { $('reg-id').select(); document.execCommand('copy'); showToast('คัดลอกแล้ว'); }
+}
+
+function hasRole(r) { return CURRENT_USER && (CURRENT_USER.roles.indexOf(r) !== -1 || CURRENT_USER.roles.indexOf(ROLES.ADMIN) !== -1); }
+function defaultView() {
+  if (hasRole(ROLES.DRIVER)) return 'driver';
+  if (hasRole(ROLES.CLERK1)) return 'clerk1';
+  if (hasRole(ROLES.CLERK2)) return 'clerk2';
+  return 'dashboard';
+}
+function buildNav() {
+  var items = [];
+  if (hasRole(ROLES.DRIVER)) items.push({ id: 'driver', ico: '🚛', label: 'งานของฉัน' });
+  if (hasRole(ROLES.CLERK1)) items.push({ id: 'clerk1', ico: '🧾', label: 'เสมียน 1' });
+  if (hasRole(ROLES.CLERK2)) items.push({ id: 'clerk2', ico: '🔍', label: 'เสมียน 2' });
+  items.push({ id: 'dashboard', ico: '📊', label: 'ภาพรวม' });
+  var nav = $('nav');
+  nav.innerHTML = items.map(function (it) {
+    return '<button id="nav-' + it.id + '" onclick="navigate(\'' + it.id + '\')"><span class="ico">' + it.ico + '</span>' + it.label + '</button>';
+  }).join('');
+  nav.style.display = 'flex';
+}
+function navigate(view) {
+  document.querySelectorAll('nav button').forEach(function (b) { b.classList.remove('active'); });
+  var btn = $('nav-' + view);
+  if (btn) btn.classList.add('active');
+  if (view === 'driver') renderDriverHome();
+  else if (view === 'clerk1') renderClerk1();
+  else if (view === 'clerk2') renderClerk2();
+  else renderDashboard();
+}
+
+function loadMasters() {
+  callServer('machineList').then(function (d) {
+    MASTERS.machines = d.items;
+    if (d.stale) $('banner-stale').style.display = 'block';
+  }).catch(function () {});
+  callServer('siteList').then(function (d) { MASTERS.sites = d.items; }).catch(function () {});
+  callServer('fuelList').then(function (d) { MASTERS.fuels = d.items; }).catch(function () {});
+  callServer('tankList').then(function (d) { MASTERS.tanks = d.items; }).catch(function () {});
+  callServer('receiverList').then(function (d) { MASTERS.receivers = d.items; }).catch(function () {});
+}
+
+/* ================================ คนขับรถน้ำมัน ================================ */
+function renderDriverHome() {
+  busy(true);
+  callServer('myOrders', CURRENT_USER.userId).then(function (orders) {
+    busy(false);
+    var html = '';
+    if (!orders.length) {
+      html += '<div class="card"><h3>ยังไม่มีใบสั่งที่กำลังทำงาน</h3>' +
+        '<button class="btn-primary" onclick="renderRequestOrderForm()">⛽ ขอใบสั่งเติมน้ำมันลงถัง</button></div>';
+    }
+    orders.forEach(function (o) {
+      html += '<div class="card">' +
+        '<h3>📋 ' + esc(o['Order ID']) + ' &nbsp;' + statusChip(o['สถานะ']) + '</h3>' +
+        '<div class="row">🚛 ' + esc(o['รถน้ำมัน']) + '</div>' +
+        '<div class="row">🛢 ' + esc(o['ชนิดน้ำมัน']) + ' — ขอ ' + esc(o['จำนวนลิตรที่ขอ']) + ' ล.' +
+        (o['จำนวนลิตรที่สั่งจ่าย'] ? ' | สั่งจ่าย ' + esc(o['จำนวนลิตรที่สั่งจ่าย']) + ' ล.' : '') + '</div>' +
+        (o['สถานที่รับน้ำมัน'] ? '<div class="row">📍 รับที่: ' + esc(o['สถานที่รับน้ำมัน']) + '</div>' : '') +
+        driverOrderButtons(o) + '</div>';
+    });
+    if (orders.length) {
+      html += '<button class="btn-secondary" onclick="renderRequestOrderForm()">⛽ ขอใบสั่งใหม่ (รถอีกคัน)</button>';
+    }
+    html += '<button class="btn-secondary" onclick="renderDriverHistory()">🕘 ประวัติใบสั่งของฉัน</button>';
+    $('main').innerHTML = html;
+  }).catch(errBack);
+}
+function driverOrderButtons(o) {
+  var st = o['สถานะ'], id = o['Order ID'];
+  if (st === 'รอออกใบสั่ง') {
+    return '<div class="muted" style="margin-top:8px">รอเสมียน 1 ออกใบสั่ง…</div>' +
+      '<button class="btn-danger btn-small" onclick="doCancelOrder(\'' + id + '\')">ยกเลิกคำขอ</button>';
+  }
+  if (st === 'ออกใบสั่งแล้ว รอรับน้ำมัน') {
+    return '<button class="btn-primary" onclick="renderLoadForm(\'' + id + '\')">🚛 บันทึกรับน้ำมันเข้าถัง</button>' +
+      '<button class="btn-danger btn-small" onclick="doCancelOrder(\'' + id + '\')">ยกเลิกใบสั่ง</button>';
+  }
+  if (st === 'รับน้ำมันแล้ว กำลังจ่ายหน้างาน') {
+    return '<button class="btn-primary" onclick="renderFillForm(\'' + id + '\')">⛽ บันทึกเติมให้เครื่องจักร</button>' +
+      '<button class="btn-secondary" onclick="renderOrderFills(\'' + id + '\', \'driver\')">📄 รายการที่เติมแล้ววันนี้</button>' +
+      '<button class="btn-secondary" onclick="renderEodForm(\'' + id + '\')">🌇 ปิดวัน / ส่งรายงาน</button>';
+  }
+  if (st === 'ส่งรายงานแล้ว รอเสมียนตรวจ') {
+    return '<div class="muted" style="margin-top:8px">ส่งรายงานแล้ว รอเสมียน 1 ตรวจ</div>' +
+      '<button class="btn-secondary btn-small" onclick="renderOrderFills(\'' + id + '\', \'driver\')">📄 ดูรายการ</button>';
+  }
+  return '';
+}
+function doCancelOrder(orderId) {
+  var reason = prompt('เหตุผลที่ยกเลิก (ไม่บังคับ)') || '';
+  busy(true);
+  callServer('cancelOrder', CURRENT_USER.userId, orderId, reason)
+    .then(function () { busy(false); showToast('ยกเลิกแล้ว'); renderDriverHome(); })
+    .catch(errToast);
+}
+
+/* ---- ขอใบสั่ง ---- */
+function renderRequestOrderForm() {
+  var tankOpts = MASTERS.tanks.map(function (t) {
+    var v = t.code + ' - ' + t.name;
+    var sel = CURRENT_USER.defaultTank && v.indexOf(CURRENT_USER.defaultTank) !== -1 ? ' selected' : '';
+    return '<option value="' + esc(v) + '"' + sel + '>' + esc(v) + (t.capacity ? ' (จุ ' + esc(t.capacity) + ' ล.)' : '') + '</option>';
+  }).join('');
+  var fuelOpts = MASTERS.fuels.map(function (f) {
+    var v = f.code + ' - ' + f.name;
+    return '<option value="' + esc(v) + '">' + esc(f.name) + '</option>';
+  }).join('');
+  $('main').innerHTML =
+    '<div class="card"><h3>⛽ ขอใบสั่งเติมน้ำมันลงถัง</h3>' +
+    '<label>รถน้ำมัน / ถัง</label><select id="f-tank">' + tankOpts + '</select>' +
+    '<label>ชนิดน้ำมัน <span class="opt">(ระบุเกรดจริงเสมอ ไม่มี "ดีเซล" กลางๆ)</span></label><select id="f-fuel">' + fuelOpts + '</select>' +
+    '<label>จำนวนลิตรที่ขอ</label><input id="f-qty" type="number" inputmode="decimal" placeholder="เช่น 5000">' +
+    '<label>หมายเหตุ <span class="opt">(ไม่บังคับ)</span></label><input id="f-note">' +
+    '<button class="btn-primary" onclick="doRequestOrder()">ส่งคำขอถึงเสมียน 1</button>' +
+    '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>';
+}
+function doRequestOrder() {
+  var payload = { tank: $('f-tank').value, fuel: $('f-fuel').value, qty: $('f-qty').value, note: $('f-note').value };
+  if (!payload.qty || parseFloat(payload.qty) <= 0) { showToast('กรอกจำนวนลิตรก่อน'); return; }
+  busy(true);
+  callServer('requestOrder', CURRENT_USER.userId, payload)
+    .then(function (d) { busy(false); showToast('ส่งคำขอแล้ว: ' + d.orderId); renderDriverHome(); })
+    .catch(errToast);
+}
+
+/* ---- รับน้ำมันเข้าถัง ---- */
+function renderLoadForm(orderId) {
+  busy(true);
+  callServer('myOrders', CURRENT_USER.userId).then(function (orders) {
+    busy(false);
+    var o = orders.filter(function (x) { return x['Order ID'] === orderId; })[0];
+    if (!o) { showToast('ไม่พบใบสั่ง'); renderDriverHome(); return; }
+    $('main').innerHTML =
+      '<div class="card"><h3>🚛 บันทึกรับน้ำมันเข้าถัง — ' + esc(orderId) + '</h3>' +
+      '<div class="row muted">' + esc(o['รถน้ำมัน']) + ' | ' + esc(o['ชนิดน้ำมัน']) + ' | สั่งจ่าย ' + esc(o['จำนวนลิตรที่สั่งจ่าย']) + ' ล.</div>' +
+      '<div class="grid2">' +
+      '<div><label>เลขตู้จ่ายก่อนรับเข้า</label><input id="f-before" type="number" inputmode="decimal" oninput="calcLoad()"></div>' +
+      '<div><label>เลขตู้จ่ายหลังรับเข้า</label><input id="f-after" type="number" inputmode="decimal" oninput="calcLoad()"></div>' +
+      '</div>' +
+      '<label>ยอดน้ำมันคงค้างในถังก่อนรับ (ลิตร)</label><input id="f-carry" type="number" inputmode="decimal" oninput="calcLoad()">' +
+      '<div class="hint" id="carry-hint">กำลังดึงยอดคงเหลือครั้งก่อน…</div>' +
+      '<label>เลขมิเตอร์หัวจ่ายบนรถ (เริ่มวัน)</label><input id="f-pumpstart" type="number" inputmode="decimal">' +
+      '<div class="hint">ใช้เป็นจุดตั้งต้นของลูกโซ่มิเตอร์ตอนจ่ายให้เครื่องจักร</div>' +
+      '<div class="calcbox" id="load-calc">รับเข้าจริง: —</div>' +
+      '<button class="btn-primary" onclick="doRecordLoad(\'' + orderId + '\')">บันทึกรับน้ำมัน</button>' +
+      '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>';
+    callServer('lastRemaining', o['รถน้ำมัน']).then(function (d) {
+      if (d.remaining != null) {
+        $('f-carry').value = d.remaining;
+        $('carry-hint').textContent = 'ยอดคงเหลือวัดจริงจากใบสั่งก่อนหน้าของรถคันนี้ = ' + d.remaining + ' ล. (แก้ได้ถ้าวัดจริงต่างจากนี้)';
+        if (d.pumpMeter != null && !$('f-pumpstart').value) $('f-pumpstart').value = d.pumpMeter;
+        calcLoad();
+      } else {
+        $('carry-hint').textContent = 'ไม่พบข้อมูลครั้งก่อน — กรอกยอดที่วัดได้ในถังตอนนี้';
+      }
+    }).catch(function () { $('carry-hint').textContent = 'ดึงยอดครั้งก่อนไม่สำเร็จ — กรอกเอง'; });
+  }).catch(errBack);
+}
+function calcLoad() {
+  var b = num($('f-before').value), a = num($('f-after').value), c = num($('f-carry').value) || 0;
+  var el = $('load-calc');
+  if (b == null || a == null) { el.innerHTML = 'รับเข้าจริง: —'; return; }
+  var recv = Math.round((a - b) * 100) / 100;
+  el.innerHTML = 'รับเข้าจริง (ตามตู้จ่าย): <span class="big">' + recv + ' ล.</span>' +
+    '<br>รวมในถังหลังรับ: <b>' + Math.round((recv + c) * 100) / 100 + ' ล.</b>' +
+    (recv <= 0 ? '<br><span class="neg">เลขหลังรับต้องมากกว่าก่อนรับ</span>' : '');
+}
+function doRecordLoad(orderId) {
+  var payload = {
+    meterBefore: $('f-before').value, meterAfter: $('f-after').value,
+    carryOver: $('f-carry').value, pumpMeterStart: $('f-pumpstart').value
+  };
+  busy(true);
+  callServer('recordLoad', CURRENT_USER.userId, orderId, payload)
+    .then(function (d) { busy(false); showToast('บันทึกแล้ว รับเข้า ' + d.received + ' ลิตร'); renderDriverHome(); })
+    .catch(errToast);
+}
+
+/* ---- ฟอร์มเติมให้เครื่องจักร ---- */
+var CURRENT_GPS = '';
+function renderFillForm(orderId) {
+  CURRENT_GPS = '';
+  var machineOpts = MASTERS.machines.map(function (m) {
+    return '<option value="' + esc(m.code) + '">' + esc(m.code + (m.name ? ' | ' + m.name : '')) + '</option>';
+  }).join('');
+  var siteOpts = MASTERS.sites.map(function (s) {
+    return '<option value="' + esc(s.code) + '">' + esc(s.code + ' | ' + s.name + (s.projectid ? ' (' + s.projectid + ')' : '')) + '</option>';
+  }).join('');
+  $('main').innerHTML =
+    '<div class="card"><h3>⛽ เติมให้เครื่องจักร — ' + esc(orderId) + '</h3>' +
+    '<label>เครื่องจักร <span class="opt">(พิมพ์ค้นหารหัส/ชื่อ — เลือกจากทะเบียนเท่านั้น)</span></label>' +
+    '<input id="f-machine" list="machine-list" placeholder="เช่น X-75" autocomplete="off" oninput="machineHint()">' +
+    '<datalist id="machine-list">' + machineOpts + '</datalist>' +
+    '<div class="hint" id="machine-hint"></div>' +
+    '<label>หน้างาน</label>' +
+    '<input id="f-site" list="site-list" placeholder="พิมพ์ค้นหารหัส/ชื่อหน้างาน" autocomplete="off" oninput="siteHint()">' +
+    '<datalist id="site-list">' + siteOpts + '</datalist>' +
+    '<div class="hint" id="site-hint"></div>' +
+    '<div class="grid2">' +
+    '<div><label>จำนวนลิตรที่เติม</label><input id="f-qty" type="number" inputmode="decimal" oninput="meterHint()"></div>' +
+    '<div><label>ผู้รับน้ำมัน / พนักงานขับ</label>' +
+    '<input id="f-receiver" list="receiver-list" placeholder="พิมพ์ค้นหาชื่อหรือรหัส" autocomplete="off" oninput="receiverHint()">' +
+    '<datalist id="receiver-list">' + MASTERS.receivers.map(function (d) {
+      return '<option value="' + esc(d.code + ' | ' + d.name) + '"></option>';
+    }).join('') + '</datalist>' +
+    '<div class="hint" id="receiver-hint">เลือกจากรายชื่อ = รหัสเข้าฐานข้อมูลครบ | พิมพ์ชื่ออิสระได้ถ้าไม่พบ</div></div>' +
+    '</div>' +
+    '<label>เลขไมล์ / ชั่วโมงเครื่องจักร</label><input id="f-mileage" type="number" inputmode="decimal">' +
+    '<label>รูปถ่ายเลขไมล์</label>' +
+    '<input type="file" accept="image/*" capture="environment" id="f-photo" onchange="previewPhoto()">' +
+    '<img id="photo-preview" class="photo-preview" style="display:none">' +
+    '<label>เลขมิเตอร์หัวจ่ายหลังเติม</label><input id="f-pumpafter" type="number" inputmode="decimal" oninput="meterHint()">' +
+    '<div class="hint" id="meter-hint">เลขก่อนเติมระบบต่อให้อัตโนมัติจากรายการก่อนหน้า</div>' +
+    '<label>วันเวลาเติม <span class="opt">(เว้นว่าง = ตอนนี้)</span></label><input id="f-datetime" placeholder="dd/mm/yyyy hh:mm">' +
+    '<div class="hint" id="gps-hint">📡 กำลังขอพิกัด GPS…</div>' +
+    '<button class="btn-primary" onclick="doSubmitFill(\'' + orderId + '\')">บันทึกการเติม</button>' +
+    '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>';
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      CURRENT_GPS = pos.coords.latitude.toFixed(6) + ',' + pos.coords.longitude.toFixed(6);
+      $('gps-hint').textContent = '📡 ได้พิกัดแล้ว: ' + CURRENT_GPS;
+    }, function () { $('gps-hint').textContent = '📡 ไม่ได้พิกัด (ไม่บังคับ)'; }, { timeout: 8000 });
+  } else { $('gps-hint').textContent = '📡 อุปกรณ์ไม่รองรับ GPS (ไม่บังคับ)'; }
+}
+function machineHint() {
+  var code = $('f-machine').value.trim();
+  var m = MASTERS.machines.filter(function (x) { return x.code === code; })[0];
+  var el = $('machine-hint');
+  if (!code) { el.textContent = ''; el.className = 'hint'; return; }
+  if (m) {
+    el.textContent = '✓ ' + m.code + ' ' + (m.name || '') + (m.lastmile ? ' | เลขไมล์ล่าสุดในระบบ: ' + m.lastmile : '');
+    el.className = 'hint';
+  } else {
+    el.textContent = '✗ ไม่พบในทะเบียน — เลือกจากรายการเท่านั้น (เครื่องใหม่ให้แจ้งเสมียน 1)';
+    el.className = 'hint error';
+  }
+}
+function siteHint() {
+  var code = $('f-site').value.trim();
+  var s = MASTERS.sites.filter(function (x) { return x.code === code; })[0];
+  var el = $('site-hint');
+  if (!code) { el.textContent = ''; el.className = 'hint'; return; }
+  if (s) { el.textContent = '✓ ' + s.name + (s.projectid ? ' | โครงการ ' + s.projectid : ''); el.className = 'hint'; }
+  else { el.textContent = '✗ ไม่พบหน้างานนี้ใน master'; el.className = 'hint error'; }
+}
+function meterHint() { /* ผลต่างมิเตอร์เทียบลิตรตรวจฝั่ง server — ที่นี่แค่บอกใบ้ */ }
+/** แยกค่าในช่องผู้รับ: "รหัส | ชื่อ" (เลือกจากลิสต์) หรือชื่อ/รหัสที่พิมพ์เอง -> {code, name} */
+function parseReceiver() {
+  var v = $('f-receiver').value.trim();
+  if (!v) return { code: '', name: '' };
+  var m = v.split(' | ');
+  if (m.length === 2) {
+    var hit = MASTERS.receivers.filter(function (d) { return d.code === m[0].trim(); })[0];
+    if (hit) return { code: hit.code, name: hit.name };
+  }
+  // พิมพ์เอง: ถ้าตรงรหัสหรือชื่อใน master พอดี ก็ผูกรหัสให้
+  var byCode = MASTERS.receivers.filter(function (d) { return d.code === v; })[0];
+  if (byCode) return { code: byCode.code, name: byCode.name };
+  var byName = MASTERS.receivers.filter(function (d) { return d.name === v; })[0];
+  if (byName) return { code: byName.code, name: byName.name };
+  return { code: '', name: v }; // ชื่ออิสระ — driver_id จะเป็น NULL ในฐานข้อมูล
+}
+function receiverHint() {
+  var r = parseReceiver();
+  var el = $('receiver-hint');
+  if (!$('f-receiver').value.trim()) { el.textContent = 'เลือกจากรายชื่อ = รหัสเข้าฐานข้อมูลครบ | พิมพ์ชื่ออิสระได้ถ้าไม่พบ'; el.className = 'hint'; return; }
+  if (r.code) { el.textContent = '✓ ' + r.code + ' ' + r.name; el.className = 'hint'; }
+  else { el.textContent = 'ไม่พบในรายชื่อ — บันทึกเป็นชื่ออิสระ (ไม่มีรหัสเข้าฐานข้อมูล)'; el.className = 'hint'; }
+}
+function previewPhoto() {
+  var f = $('f-photo').files[0];
+  if (!f) { $('photo-preview').style.display = 'none'; return; }
+  var img = $('photo-preview');
+  img.src = URL.createObjectURL(f);
+  img.style.display = 'block';
+}
+/** ย่อรูปเป็น JPEG base64 (กว้างสุด 1280px) — ลดขนาด payload แบบเดียวกับระบบขอย้ายฯ */
+function compressPhoto(file) {
+  return new Promise(function (resolve) {
+    if (!file) { resolve(null); return; }
+    var img = new Image();
+    img.onload = function () {
+      var maxW = 1280;
+      var scale = Math.min(1, maxW / img.width);
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+      resolve({ base64: dataUrl.split(',')[1], mimeType: 'image/jpeg', filename: (file.name || 'photo') + '.jpg' });
+    };
+    img.onerror = function () { resolve(null); };
+    img.src = URL.createObjectURL(file);
+  });
+}
+function doSubmitFill(orderId) {
+  var code = $('f-machine').value.trim();
+  var machine = MASTERS.machines.filter(function (x) { return x.code === code; })[0];
+  if (!machine) { showToast('เลือกเครื่องจักรจากทะเบียนก่อน'); return; }
+  var siteCode = $('f-site').value.trim();
+  var site = MASTERS.sites.filter(function (x) { return x.code === siteCode; })[0];
+  if (!site) { showToast('เลือกหน้างานจาก master ก่อน'); return; }
+  var qty = num($('f-qty').value);
+  if (!qty || qty <= 0) { showToast('กรอกจำนวนลิตรก่อน'); return; }
+  var receiver = parseReceiver();
+  if (!receiver.name) { showToast('กรอกชื่อผู้รับน้ำมันก่อน'); return; }
+  var payload = {
+    orderId: orderId,
+    machineCode: machine.code, machineName: machine.name,
+    siteCode: site.code, siteName: site.name, projectid: site.projectid,
+    qty: qty, receiver: receiver.name, receiverCode: receiver.code,
+    mileage: $('f-mileage').value, pumpMeterAfter: $('f-pumpafter').value,
+    fillDateTime: $('f-datetime').value.trim(), gps: CURRENT_GPS
+  };
+  busy(true);
+  compressPhoto($('f-photo').files[0]).then(function (photo) {
+    return callServer('submitFill', CURRENT_USER.userId, payload, photo);
+  }).then(function (d) {
+    busy(false);
+    var msg = 'บันทึกแล้ว: ' + d.fillId;
+    if (d.flags && d.flags.length) msg += '\n🚩 ' + d.flags.join(', ');
+    alert(msg + '\nจ่ายสะสม ' + d.totalSoFar + ' / มีในถัง ' + d.available + ' ล.');
+    renderDriverHome();
+  }).catch(errToast);
+}
+
+/* ---- รายการจ่ายของใบสั่ง ---- */
+function renderOrderFills(orderId, backTo) {
+  busy(true);
+  callServer('fillsOfOrder', CURRENT_USER.userId, orderId).then(function (fills) {
+    busy(false);
+    var rowsHtml = fills.map(function (f) {
+      var cancelled = f['สถานะรายการ'] !== 'ปกติ';
+      return '<tr' + (cancelled ? ' style="opacity:.45;text-decoration:line-through"' : '') + '>' +
+        '<td>' + esc(f['Fill ID']) + '</td>' +
+        '<td>' + esc(f['วันเวลาเติม']) + '</td>' +
+        '<td><b>' + esc(f['รหัสเครื่องจักร']) + '</b><br><span class="muted">' + esc(f['ชื่อเครื่องจักร']) + '</span></td>' +
+        '<td>' + esc(f['ชื่อหน้างาน']) + '</td>' +
+        '<td style="text-align:right"><b>' + esc(f['จำนวนลิตร']) + '</b></td>' +
+        '<td>' + esc(f['ผู้รับน้ำมัน']) + '</td>' +
+        '<td>' + esc(f['เลขไมล์เครื่องจักร']) +
+          (f['รูปเลขไมล์'] ? ' <a href="' + esc(f['รูปเลขไมล์']) + '" target="_blank">📷</a>' : '') + '</td>' +
+        '<td>' + flagsHtml(f['ธงเตือน']) + '</td>' +
+        '<td>' + (!cancelled && f['สถานะนำเข้า DB'] === 'รอเสมียน 1 ตรวจ' && hasRole(ROLES.DRIVER)
+          ? '<button class="btn-danger btn-small" onclick="doCancelFill(\'' + esc(f['Fill ID']) + '\',\'' + orderId + '\',\'' + backTo + '\')">ยกเลิก</button>' : '') + '</td>' +
+        '</tr>';
+    }).join('');
+    var total = fills.filter(function (f) { return f['สถานะรายการ'] === 'ปกติ'; })
+      .reduce(function (s, f) { return s + (num(f['จำนวนลิตร']) || 0); }, 0);
+    $('main').innerHTML =
+      '<div class="card"><h3>📄 รายการจ่าย — ' + esc(orderId) + '</h3>' +
+      '<div class="row">รวมจ่ายแล้ว <b>' + Math.round(total * 100) / 100 + ' ลิตร</b> (' + fills.filter(function (f) { return f['สถานะรายการ'] === 'ปกติ'; }).length + ' รายการ)</div>' +
+      '<div class="tablewrap"><table><tr><th>Fill</th><th>เวลา</th><th>เครื่องจักร</th><th>หน้างาน</th><th>ลิตร</th><th>ผู้รับ</th><th>เลขไมล์</th><th>ธง</th><th></th></tr>' +
+      (rowsHtml || '<tr><td colspan="9" class="empty">ยังไม่มีรายการ</td></tr>') + '</table></div>' +
+      '<button class="btn-secondary" onclick="' + (backTo === 'driver' ? 'renderDriverHome()' : 'renderClerk1()') + '">ย้อนกลับ</button></div>';
+  }).catch(errBack);
+}
+function doCancelFill(fillId, orderId, backTo) {
+  var reason = prompt('เหตุผลที่ยกเลิกรายการนี้') || '';
+  busy(true);
+  callServer('cancelFill', CURRENT_USER.userId, fillId, reason)
+    .then(function () { busy(false); showToast('ยกเลิกรายการแล้ว'); renderOrderFills(orderId, backTo); })
+    .catch(errToast);
+}
+
+/* ---- ปิดวัน ---- */
+function renderEodForm(orderId) {
+  busy(true);
+  Promise.all([
+    callServer('myOrders', CURRENT_USER.userId),
+    callServer('fillsOfOrder', CURRENT_USER.userId, orderId)
+  ]).then(function (res) {
+    busy(false);
+    var o = res[0].filter(function (x) { return x['Order ID'] === orderId; })[0];
+    if (!o) { renderDriverHome(); return; }
+    var fills = res[1].filter(function (f) { return f['สถานะรายการ'] === 'ปกติ'; });
+    var totalOut = fills.reduce(function (s, f) { return s + (num(f['จำนวนลิตร']) || 0); }, 0);
+    totalOut = Math.round(totalOut * 100) / 100;
+    var carry = num(o['ยอดยกมาในถัง (ลิตร)']) || 0;
+    var recv = num(o['ลิตรรับเข้าจริง']) || 0;
+    var book = Math.round((carry + recv - totalOut) * 100) / 100;
+    window.__eod = { book: book };
+    $('main').innerHTML =
+      '<div class="card"><h3>🌇 ปิดวัน — ' + esc(orderId) + '</h3>' +
+      '<div class="row">จ่ายวันนี้ <b>' + fills.length + ' รายการ รวม ' + totalOut + ' ลิตร</b></div>' +
+      '<div class="row muted">ยกมา ' + carry + ' + รับเข้า ' + recv + ' − จ่าย ' + totalOut + ' = คงเหลือตามบัญชี <b>' + book + ' ล.</b></div>' +
+      '<label>เลขมิเตอร์หัวจ่ายสิ้นวัน</label><input id="f-pumpend" type="number" inputmode="decimal">' +
+      '<label>ลิตรคงเหลือในถัง (วัดจริง)</label><input id="f-measured" type="number" inputmode="decimal" oninput="calcEod()">' +
+      '<div class="calcbox" id="eod-calc">ผลต่าง: —</div>' +
+      '<label>หมายเหตุ <span class="opt">(ไม่บังคับ)</span></label><input id="f-note">' +
+      '<button class="btn-primary" onclick="doSubmitEod(\'' + orderId + '\')">ส่งรายงานถึงเสมียน 1</button>' +
+      '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>';
+  }).catch(errBack);
+}
+function calcEod() {
+  var m = num($('f-measured').value);
+  var el = $('eod-calc');
+  if (m == null) { el.innerHTML = 'ผลต่าง: —'; return; }
+  var v = Math.round((m - window.__eod.book) * 100) / 100;
+  el.innerHTML = 'ผลต่าง (วัดจริง − ตามบัญชี): <span class="big ' + (Math.abs(v) > 20 ? 'neg' : '') + '">' +
+    (v > 0 ? '+' : '') + v + ' ลิตร</span>' +
+    (Math.abs(v) > 20 ? '<br><span class="neg">เกินเกณฑ์ 20 ลิตร — ตรวจเลขก่อนส่ง ถ้ายืนยันตามนี้เสมียน 1 จะได้รับแจ้งเตือน</span>' : '');
+}
+function doSubmitEod(orderId) {
+  var payload = { pumpMeterEnd: $('f-pumpend').value, measuredRemaining: $('f-measured').value, note: $('f-note').value };
+  if (num(payload.measuredRemaining) == null) { showToast('กรอกลิตรคงเหลือวัดจริงก่อน'); return; }
+  busy(true);
+  callServer('submitEndOfDay', CURRENT_USER.userId, orderId, payload).then(function (d) {
+    busy(false);
+    alert('ส่งรายงานแล้ว\nจ่ายรวม ' + d.totalOut + ' ล. | คงเหลือบัญชี ' + d.bookRemaining + ' ล.\nวัดจริง ' + d.measured + ' ล. | ผลต่าง ' + (d.variance > 0 ? '+' : '') + d.variance + ' ล.');
+    renderDriverHome();
+  }).catch(errToast);
+}
+function renderDriverHistory() {
+  busy(true);
+  callServer('myOrderHistory', CURRENT_USER.userId).then(function (orders) {
+    busy(false);
+    var html = '<div class="card"><h3>🕘 ประวัติใบสั่งของฉัน</h3>';
+    if (!orders.length) html += '<div class="empty">ยังไม่มีประวัติ</div>';
+    orders.forEach(function (o) {
+      html += '<div class="row" style="border-bottom:1px solid var(--c-border);padding:6px 0">' +
+        '<b>' + esc(o['Order ID']) + '</b> ' + statusChip(o['สถานะ']) +
+        '<br><span class="muted">' + esc(o['วันที่ขอ']) + ' | ' + esc(o['รถน้ำมัน']) + ' | ' + esc(o['ชนิดน้ำมัน']) +
+        (o['รวมลิตรจ่าย'] ? ' | จ่าย ' + esc(o['รวมลิตรจ่าย']) + ' ล. | ต่าง ' + esc(o['ผลต่าง (ลิตร)']) + ' ล.' : '') + '</span></div>';
+    });
+    html += '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>';
+    $('main').innerHTML = html;
+  }).catch(errBack);
+}
+
+/* ================================ เสมียน 1 ================================ */
+function renderClerk1(tab) {
+  tab = tab || 'issue';
+  var tabs = '<div class="tabbar">' +
+    '<button class="' + (tab === 'issue' ? 'active' : '') + '" onclick="renderClerk1(\'issue\')">🧾 รอออกใบสั่ง</button>' +
+    '<button class="' + (tab === 'review' ? 'active' : '') + '" onclick="renderClerk1(\'review\')">📮 รอตรวจรายงาน</button>' +
+    '<button class="' + (tab === 'active' ? 'active' : '') + '" onclick="renderClerk1(\'active\')">🚛 กำลังทำงาน</button>' +
+    '<button class="' + (tab === 'failed' ? 'active' : '') + '" onclick="renderClerk1(\'failed\')">❌ นำเข้าไม่สำเร็จ</button>' +
+    '</div>';
+  busy(true);
+  if (tab === 'issue') {
+    callServer('pendingIssue', CURRENT_USER.userId).then(function (orders) {
+      busy(false);
+      var html = tabs;
+      if (!orders.length) html += '<div class="empty">ไม่มีคำขอค้าง</div>';
+      orders.forEach(function (o) {
+        html += '<div class="card"><h3>📋 ' + esc(o['Order ID']) + '</h3>' +
+          '<div class="row">👤 ' + esc(o['คนขับรถน้ำมัน']) + ' | 🚛 ' + esc(o['รถน้ำมัน']) + '</div>' +
+          '<div class="row">🛢 ' + esc(o['ชนิดน้ำมัน']) + ' — ขอ <b>' + esc(o['จำนวนลิตรที่ขอ']) + ' ลิตร</b></div>' +
+          '<div class="row muted">' + esc(o['วันที่ขอ']) + (o['หมายเหตุ'] ? ' | ' + esc(o['หมายเหตุ']) : '') + '</div>' +
+          '<button class="btn-primary" onclick="renderIssueForm(\'' + esc(o['Order ID']) + '\')">ออกใบสั่ง</button></div>';
+      });
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  } else if (tab === 'review') {
+    callServer('pendingReview', CURRENT_USER.userId).then(function (orders) {
+      busy(false);
+      var html = tabs;
+      if (!orders.length) html += '<div class="empty">ไม่มีรายงานค้างตรวจ</div>';
+      orders.forEach(function (o) {
+        var v = num(o['ผลต่าง (ลิตร)']);
+        html += '<div class="card"><h3>📮 ' + esc(o['Order ID']) +
+          (v != null && Math.abs(v) > 20 ? ' <span class="status-chip danger">ผลต่าง ' + (v > 0 ? '+' : '') + v + ' ล.</span>' : '') + '</h3>' +
+          '<div class="row">👤 ' + esc(o['คนขับรถน้ำมัน']) + ' | 🚛 ' + esc(o['รถน้ำมัน']) + '</div>' +
+          '<div class="row">จ่าย ' + esc(o['จำนวนรายการจ่าย']) + ' รายการ รวม <b>' + esc(o['รวมลิตรจ่าย']) + ' ล.</b>' +
+          ' | บัญชี ' + esc(o['ลิตรคงเหลือตามบัญชี']) + ' ล. | วัดจริง ' + esc(o['ลิตรคงเหลือวัดจริง']) + ' ล.' +
+          ' | ต่าง <b>' + esc(o['ผลต่าง (ลิตร)']) + ' ล.</b></div>' +
+          '<div class="row muted">ปิดวันเมื่อ ' + esc(o['เวลาปิดวัน']) + '</div>' +
+          '<button class="btn-primary" onclick="renderReviewDetail(\'' + esc(o['Order ID']) + '\')">ตรวจรายงาน</button></div>';
+      });
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  } else if (tab === 'active') {
+    callServer('activeOrders', CURRENT_USER.userId).then(function (orders) {
+      busy(false);
+      var html = tabs;
+      if (!orders.length) html += '<div class="empty">ไม่มีใบสั่งที่กำลังทำงาน</div>';
+      orders.forEach(function (o) {
+        html += '<div class="card"><h3>' + esc(o['Order ID']) + ' ' + statusChip(o['สถานะ']) + '</h3>' +
+          '<div class="row">👤 ' + esc(o['คนขับรถน้ำมัน']) + ' | 🚛 ' + esc(o['รถน้ำมัน']) + ' | 🛢 ' + esc(o['ชนิดน้ำมัน']) + '</div>' +
+          '<button class="btn-secondary btn-small" onclick="renderOrderFills(\'' + esc(o['Order ID']) + '\', \'clerk1\')">ดูรายการจ่าย</button>' +
+          '<button class="btn-danger btn-small" onclick="doCancelOrder(\'' + esc(o['Order ID']) + '\')">ยกเลิกใบสั่ง</button></div>';
+      });
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  } else {
+    callServer('importFailed', CURRENT_USER.userId).then(function (fills) {
+      busy(false);
+      var html = tabs;
+      if (!fills.length) html += '<div class="empty">ไม่มีรายการนำเข้าไม่สำเร็จ 🎉</div>';
+      fills.forEach(function (f) {
+        html += '<div class="card"><h3>❌ ' + esc(f['Fill ID']) + ' (' + esc(f['Order ID']) + ')</h3>' +
+          '<div class="row">' + esc(f['รหัสเครื่องจักร']) + ' | ' + esc(f['ชื่อหน้างาน']) + ' | ' + esc(f['จำนวนลิตร']) + ' ล.</div>' +
+          '<div class="row" style="color:var(--c-danger)">' + esc(f['ข้อความ error']) + '</div>' +
+          '<button class="btn-secondary btn-small" onclick="renderEditFill(\'' + esc(f['Fill ID']) + '\',\'' + esc(f['Order ID']) + '\')">แก้ไขข้อมูล</button>' +
+          '<button class="btn-primary btn-small" onclick="doRetryImport(\'' + esc(f['Fill ID']) + '\')">ส่งเข้าคิวนำเข้าใหม่</button></div>';
+      });
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  }
+}
+function renderIssueForm(orderId) {
+  busy(true);
+  callServer('pendingIssue', CURRENT_USER.userId).then(function (orders) {
+    busy(false);
+    var o = orders.filter(function (x) { return x['Order ID'] === orderId; })[0];
+    if (!o) { renderClerk1(); return; }
+    var fuelOpts = MASTERS.fuels.map(function (f) {
+      var v = f.code + ' - ' + f.name;
+      return '<option value="' + esc(v) + '"' + (v === o['ชนิดน้ำมัน'] ? ' selected' : '') + '>' + esc(f.name) + '</option>';
+    }).join('');
+    $('main').innerHTML =
+      '<div class="card"><h3>🧾 ออกใบสั่ง — ' + esc(orderId) + '</h3>' +
+      '<div class="row">👤 ' + esc(o['คนขับรถน้ำมัน']) + ' | 🚛 ' + esc(o['รถน้ำมัน']) + ' | ขอ ' + esc(o['จำนวนลิตรที่ขอ']) + ' ล.</div>' +
+      '<label>ชนิดน้ำมัน</label><select id="f-fuel">' + fuelOpts + '</select>' +
+      '<label>จำนวนลิตรที่สั่งจ่าย</label><input id="f-qty" type="number" inputmode="decimal" value="' + esc(o['จำนวนลิตรที่ขอ']) + '">' +
+      '<label>สถานที่รับน้ำมัน</label><input id="f-place" placeholder="เช่น ปั๊ม ปตท. สาขา...">' +
+      '<label>หมายเหตุ <span class="opt">(ไม่บังคับ)</span></label><input id="f-note">' +
+      '<button class="btn-primary" onclick="doIssueOrder(\'' + esc(orderId) + '\')">ออกใบสั่ง + แจ้งคนขับ</button>' +
+      '<button class="btn-secondary" onclick="renderClerk1()">ย้อนกลับ</button></div>';
+  }).catch(errBack);
+}
+function doIssueOrder(orderId) {
+  var patch = { qtyIssued: $('f-qty').value, pickupPlace: $('f-place').value, fuel: $('f-fuel').value, note: $('f-note').value };
+  busy(true);
+  callServer('issueOrder', CURRENT_USER.userId, orderId, patch)
+    .then(function () { busy(false); showToast('ออกใบสั่งแล้ว'); renderClerk1(); })
+    .catch(errToast);
+}
+function renderReviewDetail(orderId) {
+  busy(true);
+  Promise.all([
+    callServer('pendingReview', CURRENT_USER.userId),
+    callServer('fillsOfOrder', CURRENT_USER.userId, orderId)
+  ]).then(function (res) {
+    busy(false);
+    var o = res[0].filter(function (x) { return x['Order ID'] === orderId; })[0];
+    var fills = res[1];
+    if (!o) { renderClerk1('review'); return; }
+    var rowsHtml = fills.map(function (f) {
+      var cancelled = f['สถานะรายการ'] !== 'ปกติ';
+      return '<tr' + (cancelled ? ' style="opacity:.45;text-decoration:line-through"' : '') + '>' +
+        '<td>' + esc(f['Fill ID']) + '</td><td>' + esc(f['วันเวลาเติม']) + '</td>' +
+        '<td><b>' + esc(f['รหัสเครื่องจักร']) + '</b><br><span class="muted">' + esc(f['ชื่อเครื่องจักร']) + '</span></td>' +
+        '<td>' + esc(f['ชื่อหน้างาน']) + '<br><span class="muted">' + esc(f['projectid']) + '</span></td>' +
+        '<td style="text-align:right"><b>' + esc(f['จำนวนลิตร']) + '</b></td>' +
+        '<td>' + esc(f['ผู้รับน้ำมัน']) + '</td>' +
+        '<td>' + esc(f['เลขไมล์เครื่องจักร']) +
+          (f['รูปเลขไมล์'] ? ' <a href="' + esc(f['รูปเลขไมล์']) + '" target="_blank">📷</a>' : '') + '</td>' +
+        '<td>' + esc(f['เลขมิเตอร์หัวจ่ายก่อนเติม']) + '→' + esc(f['เลขมิเตอร์หัวจ่ายหลังเติม']) + '</td>' +
+        '<td>' + flagsHtml(f['ธงเตือน']) + '</td>' +
+        '<td>' + (!cancelled ? '<button class="btn-secondary btn-small" onclick="renderEditFill(\'' + esc(f['Fill ID']) + '\',\'' + esc(orderId) + '\')">แก้ไข</button>' : '') + '</td></tr>';
+    }).join('');
+    var v = num(o['ผลต่าง (ลิตร)']);
+    $('main').innerHTML =
+      '<div class="card"><h3>📮 ตรวจรายงาน — ' + esc(orderId) + '</h3>' +
+      '<div class="row">👤 ' + esc(o['คนขับรถน้ำมัน']) + ' | 🚛 ' + esc(o['รถน้ำมัน']) + ' | 🛢 ' + esc(o['ชนิดน้ำมัน']) + '</div>' +
+      '<div class="calcbox">ยกมา ' + esc(o['ยอดยกมาในถัง (ลิตร)']) + ' + รับเข้า ' + esc(o['ลิตรรับเข้าจริง']) +
+      ' (ตู้จ่าย ' + esc(o['เลขตู้จ่ายก่อนรับ']) + '→' + esc(o['เลขตู้จ่ายหลังรับ']) + ')' +
+      ' − จ่าย ' + esc(o['รวมลิตรจ่าย']) + ' = บัญชี <b>' + esc(o['ลิตรคงเหลือตามบัญชี']) + '</b> ล.' +
+      '<br>วัดจริง <b>' + esc(o['ลิตรคงเหลือวัดจริง']) + '</b> ล. → ผลต่าง ' +
+      '<span class="big ' + (v != null && Math.abs(v) > 20 ? 'neg' : '') + '">' + esc(o['ผลต่าง (ลิตร)']) + ' ล.</span>' +
+      '<br>มิเตอร์หัวจ่าย ' + esc(o['เลขมิเตอร์หัวจ่ายเริ่มต้น']) + ' → ' + esc(o['เลขมิเตอร์หัวจ่ายสิ้นวัน']) + '</div>' +
+      '<div class="tablewrap" style="margin-top:10px"><table><tr><th>Fill</th><th>เวลา</th><th>เครื่องจักร</th><th>หน้างาน</th><th>ลิตร</th><th>ผู้รับ</th><th>เลขไมล์</th><th>มิเตอร์</th><th>ธง</th><th></th></tr>' +
+      rowsHtml + '</table></div>' +
+      '<button class="btn-primary" onclick="doApproveReport(\'' + esc(orderId) + '\')">✅ ตรวจแล้วถูกต้อง — ส่งเข้าคิวนำเข้าฐานข้อมูล</button>' +
+      '<button class="btn-danger" onclick="doRejectReport(\'' + esc(orderId) + '\')">↩️ ตีกลับให้คนขับแก้</button>' +
+      '<button class="btn-secondary" onclick="renderClerk1(\'review\')">ย้อนกลับ</button></div>';
+  }).catch(errBack);
+}
+function doApproveReport(orderId) {
+  if (!confirm('ยืนยันว่ารายงานตรงกับกระดาษแล้ว?\nทุกรายการจ่ายจะเข้าคิวนำเข้า fuel_out คืนนี้')) return;
+  busy(true);
+  callServer('approveDailyReport', CURRENT_USER.userId, orderId)
+    .then(function (d) { busy(false); showToast('ยืนยันแล้ว — ' + d.readyCount + ' รายการเข้าคิวนำเข้า'); renderClerk1('review'); })
+    .catch(errToast);
+}
+function doRejectReport(orderId) {
+  var reason = prompt('เหตุผลที่ตีกลับ (คนขับจะเห็นข้อความนี้)');
+  if (reason == null) return;
+  busy(true);
+  callServer('rejectDailyReport', CURRENT_USER.userId, orderId, reason)
+    .then(function () { busy(false); showToast('ตีกลับแล้ว'); renderClerk1('review'); })
+    .catch(errToast);
+}
+function renderEditFill(fillId, orderId) {
+  busy(true);
+  callServer('fillsOfOrder', CURRENT_USER.userId, orderId).then(function (fills) {
+    busy(false);
+    var f = fills.filter(function (x) { return x['Fill ID'] === fillId; })[0];
+    if (!f) { renderClerk1('review'); return; }
+    var machineOpts = MASTERS.machines.map(function (m) {
+      return '<option value="' + esc(m.code) + '">' + esc(m.code + ' | ' + (m.name || '')) + '</option>';
+    }).join('');
+    var siteOpts = MASTERS.sites.map(function (s) {
+      return '<option value="' + esc(s.code) + '">' + esc(s.code + ' | ' + s.name) + '</option>';
+    }).join('');
+    $('main').innerHTML =
+      '<div class="card"><h3>✏️ แก้ไขรายการ — ' + esc(fillId) + '</h3>' +
+      '<div class="muted">การแก้ทุกช่องถูกบันทึกใน Log การแก้ไข</div>' +
+      '<label>วันเวลาเติม</label><input id="e-datetime" value="' + esc(f['วันเวลาเติม']) + '">' +
+      '<label>รหัสเครื่องจักร</label><input id="e-machine" list="e-machine-list" value="' + esc(f['รหัสเครื่องจักร']) + '">' +
+      '<datalist id="e-machine-list">' + machineOpts + '</datalist>' +
+      '<label>รหัสหน้างาน</label><input id="e-site" list="e-site-list" value="' + esc(f['รหัสหน้างาน (siteid)']) + '">' +
+      '<datalist id="e-site-list">' + siteOpts + '</datalist>' +
+      '<div class="grid2">' +
+      '<div><label>จำนวนลิตร</label><input id="e-qty" type="number" value="' + esc(f['จำนวนลิตร']) + '"></div>' +
+      '<div><label>ผู้รับน้ำมัน</label><input id="e-receiver" value="' + esc(f['ผู้รับน้ำมัน']) + '"></div>' +
+      '<div><label>รหัสผู้รับ (driver_id)</label><input id="e-receivercode" list="e-receiver-list" value="' + esc(f['รหัสผู้รับ (driver_id)']) + '">' +
+      '<datalist id="e-receiver-list">' + MASTERS.receivers.map(function (d) {
+        return '<option value="' + esc(d.code) + '">' + esc(d.name) + '</option>';
+      }).join('') + '</datalist></div>' +
+      '<div><label>เลขไมล์</label><input id="e-mileage" value="' + esc(f['เลขไมล์เครื่องจักร']) + '"></div>' +
+      '<div><label>ธงเตือน</label><input id="e-flags" value="' + esc(f['ธงเตือน']) + '"></div>' +
+      '</div>' +
+      '<label>หมายเหตุ</label><input id="e-note" value="' + esc(f['หมายเหตุ']) + '">' +
+      '<button class="btn-primary" onclick="doEditFill(\'' + esc(fillId) + '\',\'' + esc(orderId) + '\')">บันทึกการแก้ไข</button>' +
+      '<button class="btn-secondary" onclick="renderReviewDetail(\'' + esc(orderId) + '\')">ย้อนกลับ</button></div>';
+  }).catch(errBack);
+}
+function doEditFill(fillId, orderId) {
+  var patch = {
+    'วันเวลาเติม': $('e-datetime').value,
+    'รหัสเครื่องจักร': $('e-machine').value.trim(),
+    'รหัสหน้างาน (siteid)': $('e-site').value.trim(),
+    'จำนวนลิตร': $('e-qty').value,
+    'ผู้รับน้ำมัน': $('e-receiver').value,
+    'รหัสผู้รับ (driver_id)': $('e-receivercode').value.trim(),
+    'เลขไมล์เครื่องจักร': $('e-mileage').value,
+    'ธงเตือน': $('e-flags').value,
+    'หมายเหตุ': $('e-note').value
+  };
+  busy(true);
+  callServer('editFill', CURRENT_USER.userId, fillId, patch)
+    .then(function (d) { busy(false); showToast('บันทึกแล้ว (' + d.changed.length + ' ช่อง)'); renderReviewDetail(orderId); })
+    .catch(errToast);
+}
+function doRetryImport(fillId) {
+  busy(true);
+  callServer('retryImport', CURRENT_USER.userId, fillId)
+    .then(function () { busy(false); showToast('ส่งเข้าคิวนำเข้าใหม่แล้ว'); renderClerk1('failed'); })
+    .catch(errToast);
+}
+
+/* ================================ เสมียน 2 ================================ */
+function renderClerk2(tab) {
+  tab = tab || 'audit';
+  var tabs = '<div class="tabbar">' +
+    '<button class="' + (tab === 'audit' ? 'active' : '') + '" onclick="renderClerk2(\'audit\')">🔍 นำเข้าแล้ว รอตรวจ</button>' +
+    '<button class="' + (tab === 'failed' ? 'active' : '') + '" onclick="renderClerk2(\'failed\')">❌ นำเข้าไม่สำเร็จ</button>' +
+    '</div>';
+  busy(true);
+  if (tab === 'audit') {
+    callServer('importedPendingAudit', CURRENT_USER.userId).then(function (fills) {
+      busy(false);
+      var html = tabs;
+      if (!fills.length) { $('main').innerHTML = html + '<div class="empty">ไม่มีรายการรอตรวจ 🎉</div>'; return; }
+      var rowsHtml = fills.map(function (f) {
+        return '<tr>' +
+          '<td><input type="checkbox" class="audit-cb" value="' + esc(f['Fill ID']) + '"></td>' +
+          '<td>' + esc(f['Fill ID']) + '<br><span class="muted">' + esc(f['Order ID']) + '</span></td>' +
+          '<td>' + esc(f['วันเวลาเติม']) + '</td>' +
+          '<td><b>' + esc(f['รหัสเครื่องจักร']) + '</b></td>' +
+          '<td>' + esc(f['ชื่อหน้างาน']) + '</td>' +
+          '<td style="text-align:right">' + esc(f['จำนวนลิตร']) + '</td>' +
+          '<td><b>' + esc(f['docno ในระบบ']) + '</b><br><span class="muted">' + esc(f['เวลานำเข้า']) + '</span></td>' +
+          '</tr>';
+      }).join('');
+      html += '<div class="card"><h3>🔍 นำเข้า fuel_out แล้ว — ตรวจกับระบบบริษัท</h3>' +
+        '<div class="muted">ติ๊กรายการที่ตรวจกับระบบแล้ว จากนั้นกดยืนยันด้านล่าง</div>' +
+        '<div class="tablewrap" style="margin-top:8px"><table><tr><th><input type="checkbox" onchange="document.querySelectorAll(\'.audit-cb\').forEach(function(c){c.checked=this.checked},this)"></th>' +
+        '<th>Fill</th><th>เวลาเติม</th><th>เครื่องจักร</th><th>หน้างาน</th><th>ลิตร</th><th>docno</th></tr>' +
+        rowsHtml + '</table></div>' +
+        '<button class="btn-primary" onclick="doAuditSelected()">✅ ยืนยันรายการที่เลือกว่าตรวจแล้ว</button></div>';
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  } else {
+    callServer('importFailed', CURRENT_USER.userId).then(function (fills) {
+      busy(false);
+      var html = tabs;
+      if (!fills.length) html += '<div class="empty">ไม่มีรายการนำเข้าไม่สำเร็จ 🎉</div>';
+      fills.forEach(function (f) {
+        html += '<div class="card"><h3>❌ ' + esc(f['Fill ID']) + ' (' + esc(f['Order ID']) + ')</h3>' +
+          '<div class="row">' + esc(f['รหัสเครื่องจักร']) + ' | ' + esc(f['ชื่อหน้างาน']) + ' | ' + esc(f['จำนวนลิตร']) + ' ล.</div>' +
+          '<div class="row" style="color:var(--c-danger)">' + esc(f['ข้อความ error']) + '</div>' +
+          '<button class="btn-primary btn-small" onclick="doRetryImport2(\'' + esc(f['Fill ID']) + '\')">ส่งเข้าคิวนำเข้าใหม่</button></div>';
+      });
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  }
+}
+function doAuditSelected() {
+  var ids = Array.prototype.slice.call(document.querySelectorAll('.audit-cb:checked')).map(function (c) { return c.value; });
+  if (!ids.length) { showToast('เลือกรายการก่อน'); return; }
+  busy(true);
+  callServer('auditFills', CURRENT_USER.userId, ids)
+    .then(function (d) { busy(false); showToast('ยืนยันแล้ว ' + d.audited.length + ' รายการ'); renderClerk2('audit'); })
+    .catch(errToast);
+}
+function doRetryImport2(fillId) {
+  busy(true);
+  callServer('retryImport', CURRENT_USER.userId, fillId)
+    .then(function () { busy(false); showToast('ส่งเข้าคิวนำเข้าใหม่แล้ว'); renderClerk2('failed'); })
+    .catch(errToast);
+}
+
+/* ================================ Dashboard ================================ */
+function renderDashboard() {
+  busy(true);
+  callServer('dashboard', CURRENT_USER.userId).then(function (d) {
+    busy(false);
+    var varRows = d.recentVariance.map(function (r) {
+      var v = num(r.variance);
+      return '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.tank) + '</td>' +
+        '<td style="text-align:right">' + esc(r.totalOut) + '</td>' +
+        '<td style="text-align:right;' + (v != null && Math.abs(v) > 20 ? 'color:var(--c-danger);font-weight:700' : '') + '">' +
+        (v != null && v > 0 ? '+' : '') + esc(r.variance) + '</td></tr>';
+    }).join('');
+    var flagRows = d.flagged.map(function (f) {
+      return '<tr><td>' + esc(f['วันเวลาเติม']) + '</td><td><b>' + esc(f['รหัสเครื่องจักร']) + '</b></td>' +
+        '<td style="text-align:right">' + esc(f['จำนวนลิตร']) + '</td><td>' + flagsHtml(f['ธงเตือน']) + '</td></tr>';
+    }).join('');
+    $('main').innerHTML =
+      '<div class="card"><h3>📊 วันนี้ (' + esc(d.today) + ')</h3>' +
+      '<div class="row">จ่ายแล้ว <b>' + d.todayLiters + ' ลิตร</b> | ' + d.todayFillCount + ' รายการ | ' + d.todayMachineCount + ' คัน</div></div>' +
+      '<div class="card"><h3>⚖️ ผลต่างถังรายวัน (ล่าสุด)</h3><div class="tablewrap"><table>' +
+      '<tr><th>ปิดวัน</th><th>รถน้ำมัน</th><th>จ่าย (ล.)</th><th>ต่าง (ล.)</th></tr>' +
+      (varRows || '<tr><td colspan="4" class="empty">ยังไม่มีข้อมูล</td></tr>') + '</table></div></div>' +
+      '<div class="card"><h3>🚩 รายการติดธงล่าสุด</h3><div class="tablewrap"><table>' +
+      '<tr><th>เวลา</th><th>เครื่องจักร</th><th>ลิตร</th><th>ธง</th></tr>' +
+      (flagRows || '<tr><td colspan="4" class="empty">ไม่มีรายการติดธง 🎉</td></tr>') + '</table></div></div>';
+  }).catch(errBack);
+}
+
+/* ================================ error helpers ================================ */
+function errToast(err) { busy(false); showToast('❌ ' + err.message); }
+function errBack(err) {
+  busy(false);
+  $('main').innerHTML = '<div class="card"><h3>โหลดข้อมูลไม่สำเร็จ</h3><div class="muted">' + esc(err.message) + '</div>' +
+    '<button class="btn-secondary" onclick="location.reload()">โหลดใหม่</button></div>';
+}
+
+init();
+</script>
+</body>
+</html>
