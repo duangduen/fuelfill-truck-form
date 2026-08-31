@@ -70,6 +70,34 @@
   input[readonly] { background: #eef1ef; color: var(--c-muted); }
   .hint { font-size: 12px; color: var(--c-muted); margin-top: 3px; }
   .hint.error { color: var(--c-danger); font-weight: 600; }
+  /* ---- searchable dropdown (ใช้แทน select/datalist ทุกช่องในระบบ) ---- */
+  .combo-btn {
+    width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: #fff; border: 1px solid var(--c-border); border-radius: 10px;
+    padding: 11px 12px; font-size: 16px; font-weight: 400; line-height: 1.2;
+    color: var(--c-text); text-align: left;
+  }
+  .combo-btn:active { background: #f4f7f5; }
+  .combo-btn.noval .combo-text { color: #9aa8a0; }
+  .combo-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .combo-caret { color: var(--c-muted); font-size: 12px; }
+  .combo-modal { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 200; display: flex; align-items: flex-end; }
+  .combo-sheet { background: #fff; width: 100%; max-height: 84vh; border-radius: 16px 16px 0 0; display: flex; flex-direction: column; overflow: hidden; }
+  .combo-head { display: flex; gap: 8px; padding: 12px; border-bottom: 1px solid var(--c-border); }
+  .combo-head input { flex: 1; }
+  .combo-close { background: #e8ede9; color: var(--c-text); padding: 11px 14px; font-size: 14px; }
+  .combo-title { font-size: 12px; color: var(--c-muted); padding: 8px 16px 0; }
+  .combo-list { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px 0 16px; }
+  .combo-item { padding: 12px 16px; border-bottom: 1px solid #f0f3f1; font-size: 15px; cursor: pointer; }
+  .combo-item:active { background: #e8f2ec; }
+  .combo-item .sub { display: block; font-size: 12px; color: var(--c-muted); margin-top: 2px; }
+  .combo-item.sel { background: #e8f2ec; font-weight: 700; }
+  .combo-item.free { color: var(--c-primary-dark); font-weight: 600; }
+  .combo-empty { padding: 22px 16px; text-align: center; color: var(--c-muted); font-size: 13px; }
+  @media (min-width: 600px) {
+    .combo-modal { align-items: center; justify-content: center; }
+    .combo-sheet { max-width: 520px; max-height: 76vh; border-radius: 14px; }
+  }
   .calcbox { background:#e8f2ec; border-radius:10px; padding:10px 12px; margin-top:10px; font-size:14px; }
   .calcbox .big { font-size:18px; font-weight:700; }
   .calcbox .neg { color: var(--c-danger); }
@@ -123,6 +151,16 @@
 <main id="main"><div class="empty">กำลังโหลด…</div></main>
 
 <nav id="nav" style="display:none"></nav>
+<div class="combo-modal" id="combo-modal" style="display:none">
+  <div class="combo-sheet">
+    <div class="combo-head">
+      <input id="combo-search" placeholder="พิมพ์ค้นหา…" autocomplete="off" oninput="comboRenderList()">
+      <button type="button" class="combo-close" onclick="comboClose()">ปิด</button>
+    </div>
+    <div class="combo-title" id="combo-title"></div>
+    <div class="combo-list" id="combo-list"></div>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 <div class="spinner" id="spinner"><div></div></div>
 
@@ -253,6 +291,124 @@ function $(id) { return document.getElementById(id); }
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+/* ======================= searchable dropdown (ใช้แทน select/datalist ทั้งระบบ) =======================
+   ทำไมไม่ใช้ของเดิม: <select> ที่มีเครื่องจักร 400+ คันเลื่อนหาบนมือถือลำบากมาก ส่วน <datalist>
+   เบราว์เซอร์ในแอป LINE (โดยเฉพาะ iOS) แสดงผลไม่สม่ำเสมอ — ตัวนี้เป็น bottom sheet + ช่องค้นหา
+   เขียนเอง ไม่พึ่ง library ภายนอก (โหลด CDN ในแอป LINE ไม่แน่นอน)
+   ค่าที่เลือกถูกเก็บใน <input type="hidden"> ที่ "id เดิม" ทุกช่อง โค้ดส่วนอื่นจึงอ่าน
+   $('f-xxx').value ได้เหมือนเดิมทุกจุด ไม่ต้องแก้ตรรกะการส่งข้อมูล */
+var COMBOS = {};          // id -> cfg
+var COMBO_ACTIVE = null;  // id ของช่องที่เปิด sheet อยู่
+
+/**
+ * คืน HTML ของช่องเลือกแบบค้นหาได้ พร้อมลงทะเบียนรายการไว้ใช้ตอนเปิด sheet
+ * cfg = { id, items:[{v,label,sub}], value, placeholder, title, allowFree, clearable, onChange }
+ *   allowFree : ให้ใช้ข้อความที่พิมพ์เองได้ (เช่นชื่อผู้รับน้ำมันที่ไม่มีใน drv_mst)
+ *   clearable : มีตัวเลือก "ไม่ระบุ" (ล้างค่า)
+ *   onChange  : ฟังก์ชันที่เรียกหลังเลือก (เช่น machineHint)
+ */
+function comboField(cfg) {
+  cfg.items = cfg.items || [];
+  COMBOS[cfg.id] = cfg;
+  var v = cfg.value == null ? '' : String(cfg.value);
+  return '<div class="combo">' +
+    '<input type="hidden" id="' + cfg.id + '" value="' + esc(v) + '">' +
+    '<button type="button" class="combo-btn' + (v ? '' : ' noval') + '" id="cbbtn-' + cfg.id + '"' +
+    ' onclick="comboOpen(\'' + cfg.id + '\')">' +
+    '<span class="combo-text">' + esc(comboLabel_(cfg, v) || cfg.placeholder || 'แตะเพื่อเลือก') + '</span>' +
+    '<span class="combo-caret">▼</span></button></div>';
+}
+/** ป้ายที่แสดงบนปุ่ม — ค่าที่ไม่มีในทะเบียน (ข้อความอิสระ/รหัสเก่าที่ถูกปิดใช้) แสดงตามค่าที่เก็บไว้ */
+function comboLabel_(cfg, v) {
+  if (!v) return '';
+  var hit = cfg.items.filter(function (it) { return String(it.v) === String(v); })[0];
+  return hit ? hit.label : v;
+}
+function comboSetValue(id, v) {
+  var cfg = COMBOS[id]; if (!cfg) return;
+  var el = $(id); if (el) el.value = v == null ? '' : v;
+  var btn = $('cbbtn-' + id);
+  if (btn) {
+    btn.className = 'combo-btn' + (v ? '' : ' noval');
+    btn.getElementsByClassName('combo-text')[0].textContent =
+      comboLabel_(cfg, v) || cfg.placeholder || 'แตะเพื่อเลือก';
+  }
+}
+function comboOpen(id) {
+  var cfg = COMBOS[id]; if (!cfg) return;
+  COMBO_ACTIVE = id;
+  $('combo-title').textContent = cfg.title || '';
+  $('combo-search').value = '';
+  $('combo-search').placeholder = cfg.searchPlaceholder || 'พิมพ์ค้นหา…';
+  $('combo-modal').style.display = 'flex';
+  comboRenderList();
+  setTimeout(function () { try { $('combo-search').focus(); } catch (e) {} }, 80);
+}
+function comboClose() {
+  $('combo-modal').style.display = 'none';
+  COMBO_ACTIVE = null;
+}
+function comboRenderList() {
+  var cfg = COMBOS[COMBO_ACTIVE]; if (!cfg) return;
+  var raw = $('combo-search').value.trim();
+  var terms = raw ? raw.toLowerCase().split(/\s+/) : [];
+  var cur = ($(cfg.id) || {}).value || '';
+  var hits = cfg.items.filter(function (it) {
+    if (!terms.length) return true;
+    var hay = (String(it.v) + ' ' + String(it.label) + ' ' + String(it.sub || '')).toLowerCase();
+    return terms.every(function (t) { return hay.indexOf(t) !== -1; }); // ค้นได้ทั้งรหัสและชื่อ หลายคำ
+  });
+  var shown = hits.slice(0, 200); // กันค้างตอนรายการยาว (เครื่องจักร 400+) — พิมพ์เพิ่มเพื่อแคบลง
+  var html = '';
+  if (cfg.clearable) html += '<div class="combo-item" data-v="">— ไม่ระบุ —</div>';
+  if (cfg.allowFree && raw) {
+    html += '<div class="combo-item free" data-v="' + esc(raw) + '">✍️ ใช้ข้อความที่พิมพ์: “' + esc(raw) + '”</div>';
+  }
+  html += shown.map(function (it) {
+    return '<div class="combo-item' + (String(it.v) === String(cur) ? ' sel' : '') + '" data-v="' + esc(it.v) + '">' +
+      esc(it.label) + (it.sub ? '<span class="sub">' + esc(it.sub) + '</span>' : '') + '</div>';
+  }).join('');
+  if (!shown.length && !cfg.allowFree) {
+    html += '<div class="combo-empty">ไม่พบรายการที่ตรงกับ “' + esc(raw) + '”</div>';
+  }
+  if (hits.length > shown.length) {
+    html += '<div class="combo-empty">แสดง ' + shown.length + ' จาก ' + hits.length + ' รายการ — พิมพ์เพิ่มเพื่อค้นหาให้แคบลง</div>';
+  }
+  $('combo-list').innerHTML = html;
+  $('combo-list').scrollTop = 0;
+}
+function comboPick_(v) {
+  var id = COMBO_ACTIVE; if (!id) return;
+  var cfg = COMBOS[id];
+  comboSetValue(id, v);
+  comboClose();
+  if (cfg && typeof cfg.onChange === 'function') cfg.onChange(v);
+}
+/** ผูก event ครั้งเดียวตอนเริ่มระบบ (ใช้ delegation เพราะรายการถูก render ใหม่ทุกครั้งที่พิมพ์) */
+function comboInit_() {
+  $('combo-list').addEventListener('click', function (ev) {
+    var el = ev.target;
+    while (el && el !== this && !(el.className && String(el.className).indexOf('combo-item') !== -1)) el = el.parentNode;
+    if (!el || el === this) return;
+    comboPick_(el.getAttribute('data-v'));
+  });
+  $('combo-modal').addEventListener('click', function (ev) { if (ev.target === this) comboClose(); });
+}
+/** ค่าเริ่มต้นชนิดน้ำมันของทุกใบคำขอ = ดีเซล B-20 (fuelcode 12) — ถ้าไม่มีในทะเบียนค่อยใช้รายการแรก */
+function defaultFuelValue() {
+  var list = MASTERS.fuels || [];
+  var hit = list.filter(function (f) { return String(f.code).trim() === '12'; })[0] ||
+    list.filter(function (f) { return /b\s*-?\s*20/i.test(String(f.name)); })[0] ||
+    list[0];
+  return hit ? hit.code + ' - ' + hit.name : '';
+}
+/** แปลง MASTERS.fuels เป็นรายการของ combo (value คงรูปแบบเดิม "code - name" ที่ฝั่ง server ใช้อยู่) */
+function fuelComboItems() {
+  return (MASTERS.fuels || []).map(function (f) {
+    return { v: f.code + ' - ' + f.name, label: f.name, sub: 'รหัส ' + f.code };
   });
 }
 function showToast(msg) {
@@ -418,19 +574,28 @@ function doCancelOrder(orderId) {
 
 /* ---- ขอใบสั่ง ---- */
 function renderRequestOrderForm() {
-  var tankOpts = MASTERS.tanks.map(function (t) {
+  var tankItems = MASTERS.tanks.map(function (t) {
     var v = t.code + ' - ' + t.name;
-    var sel = CURRENT_USER.defaultTank && v.indexOf(CURRENT_USER.defaultTank) !== -1 ? ' selected' : '';
-    return '<option value="' + esc(v) + '"' + sel + '>' + esc(v) + (t.capacity ? ' (จุ ' + esc(t.capacity) + ' ล.)' : '') + '</option>';
-  }).join('');
-  var fuelOpts = MASTERS.fuels.map(function (f) {
-    var v = f.code + ' - ' + f.name;
-    return '<option value="' + esc(v) + '">' + esc(f.name) + '</option>';
-  }).join('');
+    return { v: v, label: v, sub: t.capacity ? 'ความจุ ' + t.capacity + ' ลิตร' : '' };
+  });
+  var defTank = '';
+  if (CURRENT_USER.defaultTank) {
+    var hitTank = tankItems.filter(function (it) { return it.v.indexOf(CURRENT_USER.defaultTank) !== -1; })[0];
+    if (hitTank) defTank = hitTank.v;
+  }
   $('main').innerHTML =
     '<div class="card"><h3>⛽ ขอใบสั่งเติมน้ำมันลงถัง</h3>' +
-    '<label>รถน้ำมัน / ถัง</label><select id="f-tank">' + tankOpts + '</select>' +
-    '<label>ชนิดน้ำมัน <span class="opt">(ระบุเกรดจริงเสมอ ไม่มี "ดีเซล" กลางๆ)</span></label><select id="f-fuel">' + fuelOpts + '</select>' +
+    '<label>รถน้ำมัน / ถัง</label>' +
+    comboField({
+      id: 'f-tank', items: tankItems, value: defTank,
+      title: 'เลือกรถน้ำมัน / ถัง', placeholder: 'แตะเพื่อเลือกรถน้ำมัน',
+      searchPlaceholder: 'พิมพ์รหัสหรือทะเบียนรถ…'
+    }) +
+    '<label>ชนิดน้ำมัน <span class="opt">(ระบุเกรดจริงเสมอ ไม่มี "ดีเซล" กลางๆ)</span></label>' +
+    comboField({
+      id: 'f-fuel', items: fuelComboItems(), value: defaultFuelValue(),
+      title: 'เลือกชนิดน้ำมัน (ค่าเริ่มต้น B-20)', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสน้ำมัน…'
+    }) +
     '<label>จำนวนลิตรที่ขอ</label><input id="f-qty" type="number" inputmode="decimal" placeholder="เช่น 5000">' +
     '<label>หมายเหตุ <span class="opt">(ไม่บังคับ)</span></label><input id="f-note">' +
     '<button class="btn-primary" onclick="doRequestOrder()">ส่งคำขอถึงเสมียน 1</button>' +
@@ -438,6 +603,8 @@ function renderRequestOrderForm() {
 }
 function doRequestOrder() {
   var payload = { tank: $('f-tank').value, fuel: $('f-fuel').value, qty: $('f-qty').value, note: $('f-note').value };
+  if (!payload.tank) { showToast('เลือกรถน้ำมัน / ถังก่อน'); return; }
+  if (!payload.fuel) { showToast('เลือกชนิดน้ำมันก่อน'); return; }
   if (!payload.qty || parseFloat(payload.qty) <= 0) { showToast('กรอกจำนวนลิตรก่อน'); return; }
   busy(true);
   callServer('requestOrder', CURRENT_USER.userId, payload)
@@ -502,29 +669,43 @@ function doRecordLoad(orderId) {
 var CURRENT_GPS = '';
 function renderFillForm(orderId) {
   CURRENT_GPS = '';
-  var machineOpts = MASTERS.machines.map(function (m) {
-    return '<option value="' + esc(m.code) + '">' + esc(m.code + (m.name ? ' | ' + m.name : '')) + '</option>';
-  }).join('');
-  var siteOpts = MASTERS.sites.map(function (s) {
-    return '<option value="' + esc(s.code) + '">' + esc(s.code + ' | ' + s.name + (s.projectid ? ' (' + s.projectid + ')' : '')) + '</option>';
-  }).join('');
+  var machineItems = MASTERS.machines.map(function (m) {
+    return {
+      v: m.code, label: m.code + (m.name ? ' | ' + m.name : ''),
+      sub: m.lastmile ? 'เลขไมล์ล่าสุดในระบบ ' + m.lastmile : ''
+    };
+  });
+  var siteItems = MASTERS.sites.map(function (s) {
+    return { v: s.code, label: s.code + ' | ' + s.name, sub: s.projectid ? 'โครงการ ' + s.projectid : '' };
+  });
+  var receiverItems = MASTERS.receivers.map(function (d) {
+    return { v: d.code + ' | ' + d.name, label: d.name, sub: 'รหัส ' + d.code };
+  });
   $('main').innerHTML =
     '<div class="card"><h3>⛽ เติมให้เครื่องจักร — ' + esc(orderId) + '</h3>' +
-    '<label>เครื่องจักร <span class="opt">(พิมพ์ค้นหารหัส/ชื่อ — เลือกจากทะเบียนเท่านั้น)</span></label>' +
-    '<input id="f-machine" list="machine-list" placeholder="เช่น X-75" autocomplete="off" oninput="machineHint()">' +
-    '<datalist id="machine-list">' + machineOpts + '</datalist>' +
+    '<label>เครื่องจักร <span class="opt">(แตะแล้วพิมพ์ค้นหารหัส/ชื่อ — เลือกจากทะเบียนเท่านั้น)</span></label>' +
+    comboField({
+      id: 'f-machine', items: machineItems, title: 'เลือกเครื่องจักรจากทะเบียน',
+      placeholder: 'แตะเพื่อค้นหาเครื่องจักร', searchPlaceholder: 'เช่น X-75 หรือชื่อเครื่องจักร…',
+      onChange: machineHint
+    }) +
     '<div class="hint" id="machine-hint"></div>' +
     '<label>หน้างาน</label>' +
-    '<input id="f-site" list="site-list" placeholder="พิมพ์ค้นหารหัส/ชื่อหน้างาน" autocomplete="off" oninput="siteHint()">' +
-    '<datalist id="site-list">' + siteOpts + '</datalist>' +
+    comboField({
+      id: 'f-site', items: siteItems, title: 'เลือกหน้างาน',
+      placeholder: 'แตะเพื่อค้นหาหน้างาน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อหน้างาน…',
+      onChange: siteHint
+    }) +
     '<div class="hint" id="site-hint"></div>' +
     '<div class="grid2">' +
     '<div><label>จำนวนลิตรที่เติม</label><input id="f-qty" type="number" inputmode="decimal" oninput="meterHint()"></div>' +
     '<div><label>ผู้รับน้ำมัน / พนักงานขับ</label>' +
-    '<input id="f-receiver" list="receiver-list" placeholder="พิมพ์ค้นหาชื่อหรือรหัส" autocomplete="off" oninput="receiverHint()">' +
-    '<datalist id="receiver-list">' + MASTERS.receivers.map(function (d) {
-      return '<option value="' + esc(d.code + ' | ' + d.name) + '"></option>';
-    }).join('') + '</datalist>' +
+    comboField({
+      id: 'f-receiver', items: receiverItems, allowFree: true, clearable: true,
+      title: 'เลือกผู้รับน้ำมัน (พิมพ์ชื่ออิสระได้ถ้าไม่มีในรายชื่อ)',
+      placeholder: 'แตะเพื่อค้นหาชื่อผู้รับ', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสผู้รับ…',
+      onChange: receiverHint
+    }) +
     '<div class="hint" id="receiver-hint">เลือกจากรายชื่อ = รหัสเข้าฐานข้อมูลครบ | พิมพ์ชื่ออิสระได้ถ้าไม่พบ</div></div>' +
     '</div>' +
     '<label>เลขไมล์ / ชั่วโมงเครื่องจักร</label><input id="f-mileage" type="number" inputmode="decimal">' +
@@ -827,14 +1008,15 @@ function renderIssueForm(orderId) {
     busy(false);
     var o = orders.filter(function (x) { return x['Order ID'] === orderId; })[0];
     if (!o) { renderClerk1(); return; }
-    var fuelOpts = MASTERS.fuels.map(function (f) {
-      var v = f.code + ' - ' + f.name;
-      return '<option value="' + esc(v) + '"' + (v === o['ชนิดน้ำมัน'] ? ' selected' : '') + '>' + esc(f.name) + '</option>';
-    }).join('');
     $('main').innerHTML =
       '<div class="card"><h3>🧾 ออกใบสั่ง — ' + esc(orderId) + '</h3>' +
       '<div class="row">👤 ' + esc(o['คนขับรถน้ำมัน']) + ' | 🚛 ' + esc(o['รถน้ำมัน']) + ' | ขอ ' + esc(o['จำนวนลิตรที่ขอ']) + ' ล.</div>' +
-      '<label>ชนิดน้ำมัน</label><select id="f-fuel">' + fuelOpts + '</select>' +
+      '<label>ชนิดน้ำมัน</label>' +
+      comboField({
+        id: 'f-fuel', items: fuelComboItems(),
+        value: o['ชนิดน้ำมัน'] || defaultFuelValue(), // ตามที่คนขับขอมา ถ้าว่างใช้ B-20
+        title: 'เลือกชนิดน้ำมัน', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสน้ำมัน…'
+      }) +
       '<label>จำนวนลิตรที่สั่งจ่าย</label><input id="f-qty" type="number" inputmode="decimal" value="' + esc(o['จำนวนลิตรที่ขอ']) + '">' +
       '<label>สถานที่รับน้ำมัน</label><input id="f-place" placeholder="เช่น ปั๊ม ปตท. สาขา...">' +
       '<label>หมายเหตุ <span class="opt">(ไม่บังคับ)</span></label><input id="f-note">' +
@@ -911,27 +1093,38 @@ function renderEditFill(fillId, orderId) {
     busy(false);
     var f = fills.filter(function (x) { return x['Fill ID'] === fillId; })[0];
     if (!f) { renderClerk1('review'); return; }
-    var machineOpts = MASTERS.machines.map(function (m) {
-      return '<option value="' + esc(m.code) + '">' + esc(m.code + ' | ' + (m.name || '')) + '</option>';
-    }).join('');
-    var siteOpts = MASTERS.sites.map(function (s) {
-      return '<option value="' + esc(s.code) + '">' + esc(s.code + ' | ' + s.name) + '</option>';
-    }).join('');
+    var machineItems = MASTERS.machines.map(function (m) {
+      return { v: m.code, label: m.code + ' | ' + (m.name || ''), sub: m.lastmile ? 'เลขไมล์ล่าสุด ' + m.lastmile : '' };
+    });
+    var siteItems = MASTERS.sites.map(function (s) {
+      return { v: s.code, label: s.code + ' | ' + s.name, sub: s.projectid ? 'โครงการ ' + s.projectid : '' };
+    });
+    var receiverItems = MASTERS.receivers.map(function (d) {
+      return { v: d.code, label: d.code + ' | ' + d.name, sub: '' };
+    });
     $('main').innerHTML =
       '<div class="card"><h3>✏️ แก้ไขรายการ — ' + esc(fillId) + '</h3>' +
       '<div class="muted">การแก้ทุกช่องถูกบันทึกใน Log การแก้ไข</div>' +
       '<label>วันเวลาเติม</label><input id="e-datetime" value="' + esc(f['วันเวลาเติม']) + '">' +
-      '<label>รหัสเครื่องจักร</label><input id="e-machine" list="e-machine-list" value="' + esc(f['รหัสเครื่องจักร']) + '">' +
-      '<datalist id="e-machine-list">' + machineOpts + '</datalist>' +
-      '<label>รหัสหน้างาน</label><input id="e-site" list="e-site-list" value="' + esc(f['รหัสหน้างาน (siteid)']) + '">' +
-      '<datalist id="e-site-list">' + siteOpts + '</datalist>' +
+      '<label>รหัสเครื่องจักร</label>' +
+      comboField({
+        id: 'e-machine', items: machineItems, value: f['รหัสเครื่องจักร'],
+        title: 'เลือกเครื่องจักรจากทะเบียน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อเครื่องจักร…'
+      }) +
+      '<label>รหัสหน้างาน</label>' +
+      comboField({
+        id: 'e-site', items: siteItems, value: f['รหัสหน้างาน (siteid)'],
+        title: 'เลือกหน้างาน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อหน้างาน…'
+      }) +
       '<div class="grid2">' +
       '<div><label>จำนวนลิตร</label><input id="e-qty" type="number" value="' + esc(f['จำนวนลิตร']) + '"></div>' +
       '<div><label>ผู้รับน้ำมัน</label><input id="e-receiver" value="' + esc(f['ผู้รับน้ำมัน']) + '"></div>' +
-      '<div><label>รหัสผู้รับ (driver_id)</label><input id="e-receivercode" list="e-receiver-list" value="' + esc(f['รหัสผู้รับ (driver_id)']) + '">' +
-      '<datalist id="e-receiver-list">' + MASTERS.receivers.map(function (d) {
-        return '<option value="' + esc(d.code) + '">' + esc(d.name) + '</option>';
-      }).join('') + '</datalist></div>' +
+      '<div><label>รหัสผู้รับ (driver_id) <span class="opt">(เว้นว่าง = NULL)</span></label>' +
+      comboField({
+        id: 'e-receivercode', items: receiverItems, value: f['รหัสผู้รับ (driver_id)'], clearable: true,
+        title: 'เลือกรหัสผู้รับจาก drv_mst', placeholder: 'ไม่ระบุ',
+        searchPlaceholder: 'พิมพ์รหัสหรือชื่อผู้รับ…', onChange: editReceiverPicked_
+      }) + '</div>' +
       '<div><label>เลขไมล์</label><input id="e-mileage" value="' + esc(f['เลขไมล์เครื่องจักร']) + '"></div>' +
       '<div><label>ธงเตือน</label><input id="e-flags" value="' + esc(f['ธงเตือน']) + '"></div>' +
       '</div>' +
@@ -939,6 +1132,12 @@ function renderEditFill(fillId, orderId) {
       '<button class="btn-primary" onclick="doEditFill(\'' + esc(fillId) + '\',\'' + esc(orderId) + '\')">บันทึกการแก้ไข</button>' +
       '<button class="btn-secondary" onclick="renderReviewDetail(\'' + esc(orderId) + '\')">ย้อนกลับ</button></div>';
   }).catch(errBack);
+}
+/** เลือกรหัสผู้รับในหน้าแก้ไข -> เติมชื่อผู้รับให้อัตโนมัติ (ยังแก้เองทับได้) */
+function editReceiverPicked_(code) {
+  if (!code) return;
+  var hit = MASTERS.receivers.filter(function (d) { return d.code === code; })[0];
+  if (hit && $('e-receiver')) $('e-receiver').value = hit.name;
 }
 function doEditFill(fillId, orderId) {
   var patch = {
@@ -1062,6 +1261,7 @@ function errBack(err) {
     '<button class="btn-secondary" onclick="location.reload()">โหลดใหม่</button></div>';
 }
 
+comboInit_();
 init();
 </script>
 </body>
