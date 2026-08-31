@@ -506,15 +506,38 @@ function navigate(view) {
   else renderDashboard();
 }
 
+var MASTER_LOADERS = {
+  machines:  { action: 'machineList',  label: 'ทะเบียนเครื่องจักร' },
+  sites:     { action: 'siteList',     label: 'รายชื่อหน้างาน' },
+  fuels:     { action: 'fuelList',     label: 'ชนิดน้ำมัน' },
+  tanks:     { action: 'tankList',     label: 'ทะเบียนรถน้ำมัน' },
+  receivers: { action: 'receiverList', label: 'รายชื่อผู้รับน้ำมัน' }
+};
 function loadMasters() {
-  callServer('machineList').then(function (d) {
-    MASTERS.machines = d.items;
-    if (d.stale) $('banner-stale').style.display = 'block';
-  }).catch(function () {});
-  callServer('siteList').then(function (d) { MASTERS.sites = d.items; }).catch(function () {});
-  callServer('fuelList').then(function (d) { MASTERS.fuels = d.items; }).catch(function () {});
-  callServer('tankList').then(function (d) { MASTERS.tanks = d.items; }).catch(function () {});
-  callServer('receiverList').then(function (d) { MASTERS.receivers = d.items; }).catch(function () {});
+  Object.keys(MASTER_LOADERS).forEach(function (k) { loadMaster_(k).catch(function () {}); });
+}
+function loadMaster_(key) {
+  return callServer(MASTER_LOADERS[key].action).then(function (d) {
+    MASTERS[key] = d.items || [];
+    if (key === 'machines' && d.stale) $('banner-stale').style.display = 'block';
+    return MASTERS[key];
+  });
+}
+/**
+ * โหลด master ที่หน้าจอนั้นต้องใช้ให้ครบ "ก่อน" render
+ * กันเคสที่ loadMasters() ตอนเข้าระบบยังโหลดไม่เสร็จ หรือล้มเหลวไปเงียบ ๆ
+ * แล้วฟอร์มถูก render ด้วยรายการว่าง (ค่าเริ่มต้นอย่างรถประจำจะหายไปโดยไม่มีใครรู้)
+ */
+function ensureMasters(keys) {
+  var missing = keys.filter(function (k) { return !(MASTERS[k] && MASTERS[k].length); });
+  if (!missing.length) return Promise.resolve();
+  busy(true);
+  return Promise.all(missing.map(loadMaster_)).then(function () {
+    busy(false);
+  }, function (err) {
+    busy(false);
+    throw new Error('โหลดทะเบียนข้อมูลไม่สำเร็จ (' + missing.map(function (k) { return MASTER_LOADERS[k].label; }).join(', ') + ') — ' + err.message);
+  });
 }
 
 /* ================================ คนขับรถน้ำมัน ================================ */
@@ -573,16 +596,39 @@ function doCancelOrder(orderId) {
 }
 
 /* ---- ขอใบสั่ง ---- */
+/**
+ * หา "รถประจำ" ของคนขับจากค่าในแท็บสิทธิ์ผู้ใช้งาน (คอลัมน์ รถน้ำมันประจำ)
+ * รองรับได้ทั้งกรอกเป็นรหัสล้วน (403), ข้อความเต็ม (403 - รถน้ำมัน 83-0551),
+ * ชื่อ/ทะเบียนอย่างเดียว (83-0551) และกรณีมีช่องว่างหน้า-หลังติดมา
+ */
+function findDefaultTank_(items, def) {
+  var d = String(def == null ? '' : def).trim().toLowerCase();
+  if (!d) return '';
+  function n(s) { return String(s == null ? '' : s).trim().toLowerCase(); }
+  var hit =
+    items.filter(function (it) { return n(it.v) === d; })[0] ||                      // ตรงเป๊ะทั้งข้อความ
+    items.filter(function (it) { return it.code && n(it.code) === d; })[0] ||        // ตรงรหัสรถ
+    items.filter(function (it) { return n(it.v).indexOf(d) !== -1; })[0] ||          // ข้อความในทะเบียนมีคำนี้
+    items.filter(function (it) {                                                    // โปรไฟล์เก็บข้อความยาวกว่า
+      return it.code && d.split(/[^0-9a-zA-Zก-๙\-]+/).indexOf(n(it.code)) !== -1;
+    })[0];
+  return hit ? hit.v : '';
+}
 function renderRequestOrderForm() {
+  ensureMasters(['tanks', 'fuels']).then(renderRequestOrderForm_).catch(errBack);
+}
+function renderRequestOrderForm_() {
   var tankItems = MASTERS.tanks.map(function (t) {
     var v = t.code + ' - ' + t.name;
-    return { v: v, label: v, sub: t.capacity ? 'ความจุ ' + t.capacity + ' ลิตร' : '' };
+    return { v: v, code: t.code, label: v, sub: t.capacity ? 'ความจุ ' + t.capacity + ' ลิตร' : '' };
   });
-  var defTank = '';
-  if (CURRENT_USER.defaultTank) {
-    var hitTank = tankItems.filter(function (it) { return it.v.indexOf(CURRENT_USER.defaultTank) !== -1; })[0];
-    if (hitTank) defTank = hitTank.v;
-  }
+  var defTank = findDefaultTank_(tankItems, CURRENT_USER.defaultTank);
+  // บอกให้เห็นชัดว่าค่าเริ่มต้นมาจากไหน / ทำไมไม่มา แทนที่จะเงียบไปเฉย ๆ
+  var tankHint;
+  if (defTank) tankHint = 'ค่าเริ่มต้น = รถประจำของคุณ (เปลี่ยนได้ถ้าวันนี้ใช้คันอื่น)';
+  else if (!tankItems.length) tankHint = '⚠️ ยังโหลดทะเบียนรถน้ำมันไม่ได้ — ลองโหลดหน้าใหม่';
+  else if (CURRENT_USER.defaultTank) tankHint = '⚠️ รถประจำในโปรไฟล์ ("' + esc(CURRENT_USER.defaultTank) + '") ไม่ตรงกับทะเบียนรถน้ำมัน — เลือกเอง แล้วแจ้งผู้ดูแลแก้คอลัมน์ "รถน้ำมันประจำ"';
+  else tankHint = 'ยังไม่ได้ตั้งรถประจำในแท็บสิทธิ์ผู้ใช้งาน — เลือกเองทุกครั้ง';
   $('main').innerHTML =
     '<div class="card"><h3>⛽ ขอใบสั่งเติมน้ำมันลงถัง</h3>' +
     '<label>รถน้ำมัน / ถัง</label>' +
@@ -591,6 +637,7 @@ function renderRequestOrderForm() {
       title: 'เลือกรถน้ำมัน / ถัง', placeholder: 'แตะเพื่อเลือกรถน้ำมัน',
       searchPlaceholder: 'พิมพ์รหัสหรือทะเบียนรถ…'
     }) +
+    '<div class="hint' + (defTank ? '' : ' error') + '">' + tankHint + '</div>' +
     '<label>ชนิดน้ำมัน <span class="opt">(ระบุเกรดจริงเสมอ ไม่มี "ดีเซล" กลางๆ)</span></label>' +
     comboField({
       id: 'f-fuel', items: fuelComboItems(), value: defaultFuelValue(),
@@ -668,6 +715,10 @@ function doRecordLoad(orderId) {
 /* ---- ฟอร์มเติมให้เครื่องจักร ---- */
 var CURRENT_GPS = '';
 function renderFillForm(orderId) {
+  ensureMasters(['machines', 'sites', 'receivers'])
+    .then(function () { renderFillForm_(orderId); }).catch(errBack);
+}
+function renderFillForm_(orderId) {
   CURRENT_GPS = '';
   var machineItems = MASTERS.machines.map(function (m) {
     return {
@@ -1003,6 +1054,9 @@ function renderClerk1(tab) {
   }
 }
 function renderIssueForm(orderId) {
+  ensureMasters(['fuels']).then(function () { renderIssueForm_(orderId); }).catch(errBack);
+}
+function renderIssueForm_(orderId) {
   busy(true);
   callServer('pendingIssue', CURRENT_USER.userId).then(function (orders) {
     busy(false);
@@ -1088,6 +1142,10 @@ function doRejectReport(orderId) {
     .catch(errToast);
 }
 function renderEditFill(fillId, orderId) {
+  ensureMasters(['machines', 'sites', 'receivers'])
+    .then(function () { renderEditFill_(fillId, orderId); }).catch(errBack);
+}
+function renderEditFill_(fillId, orderId) {
   busy(true);
   callServer('fillsOfOrder', CURRENT_USER.userId, orderId).then(function (fills) {
     busy(false);
