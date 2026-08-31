@@ -173,8 +173,12 @@ var API_URL = 'https://script.google.com/macros/s/AKfycbzShJ2KgmFbjA64tk7KqoNFkS
 // เปิดทดสอบบนเบราว์เซอร์ปกติโดยไม่ผ่าน LINE: ?dev=LINE_USER_ID_ที่ลงทะเบียนไว้
 var DEV_USER_ID = new URLSearchParams(location.search).get('dev');
 
+// ค่าเริ่มต้นของฟอร์ม (แก้ตรงนี้ที่เดียวถ้าธุรกิจเปลี่ยน)
+var DEFAULT_FUEL_CODE = '12';         // ดีเซล B-20 — เกรดที่ใช้จริงเกือบทั้งหมด
+var DEFAULT_PO_LOCATION_CODE = '10401'; // สถานที่รับน้ำมันที่ใช้บ่อยที่สุด (fuel_po_location.code)
+
 var CURRENT_USER = null; // {userId, name, roles:[...], defaultTank}
-var MASTERS = { machines: [], sites: [], fuels: [], tanks: [], receivers: [] };
+var MASTERS = { machines: [], sites: [], fuels: [], tanks: [], poLocations: [], receivers: [] };
 var ROLES = { DRIVER: 'คนขับรถน้ำมัน', CLERK1: 'เสมียน1', CLERK2: 'เสมียน2', ADMIN: 'ผู้ดูแล' };
 
 /* ================================ JSONP / POST bridge (pattern ระบบขอย้ายฯ) ================================ */
@@ -231,7 +235,7 @@ function formPostRequest(fields) {
 
 var GET_ACTION_ARGS = {
   whoAmI: ['userId'],
-  machineList: [], siteList: [], fuelList: [], tankList: [], receiverList: [],
+  machineList: [], siteList: [], fuelList: [], tankList: [], poLocationList: [], receiverList: [],
   lastRemaining: ['tank'],
   myOrders: ['userId'], myOrderHistory: ['userId'],
   pendingIssue: ['userId'], activeOrders: ['userId'], orderHistory: ['userId'],
@@ -400,9 +404,22 @@ function comboInit_() {
 /** ค่าเริ่มต้นชนิดน้ำมันของทุกใบคำขอ = ดีเซล B-20 (fuelcode 12) — ถ้าไม่มีในทะเบียนค่อยใช้รายการแรก */
 function defaultFuelValue() {
   var list = MASTERS.fuels || [];
-  var hit = list.filter(function (f) { return String(f.code).trim() === '12'; })[0] ||
+  var hit = list.filter(function (f) { return String(f.code).trim() === DEFAULT_FUEL_CODE; })[0] ||
     list.filter(function (f) { return /b\s*-?\s*20/i.test(String(f.name)); })[0] ||
     list[0];
+  return hit ? hit.code + ' - ' + hit.name : '';
+}
+/** รายการสถานที่รับน้ำมัน (ปั๊ม/คลัง) สำหรับ combo ของเสมียน 1 */
+function poLocationComboItems() {
+  return (MASTERS.poLocations || []).map(function (p) {
+    return { v: p.code + ' - ' + p.name, code: p.code, label: p.name, sub: p.fullname || ('รหัส ' + p.code) };
+  });
+}
+/** ค่าเริ่มต้นสถานที่รับน้ำมัน — ไม่บังคับเลือกตัวแรกถ้าหารหัสที่ตั้งไว้ไม่เจอ (กันออกใบสั่งผิดปั๊มเงียบ ๆ) */
+function defaultPoLocationValue() {
+  var hit = (MASTERS.poLocations || []).filter(function (p) {
+    return String(p.code).trim() === DEFAULT_PO_LOCATION_CODE;
+  })[0];
   return hit ? hit.code + ' - ' + hit.name : '';
 }
 /** แปลง MASTERS.fuels เป็นรายการของ combo (value คงรูปแบบเดิม "code - name" ที่ฝั่ง server ใช้อยู่) */
@@ -511,6 +528,7 @@ var MASTER_LOADERS = {
   sites:     { action: 'siteList',     label: 'รายชื่อหน้างาน' },
   fuels:     { action: 'fuelList',     label: 'ชนิดน้ำมัน' },
   tanks:     { action: 'tankList',     label: 'ทะเบียนรถน้ำมัน' },
+  poLocations: { action: 'poLocationList', label: 'สถานที่รับน้ำมัน' },
   receivers: { action: 'receiverList', label: 'รายชื่อผู้รับน้ำมัน' }
 };
 function loadMasters() {
@@ -1054,7 +1072,7 @@ function renderClerk1(tab) {
   }
 }
 function renderIssueForm(orderId) {
-  ensureMasters(['fuels']).then(function () { renderIssueForm_(orderId); }).catch(errBack);
+  ensureMasters(['fuels', 'poLocations']).then(function () { renderIssueForm_(orderId); }).catch(errBack);
 }
 function renderIssueForm_(orderId) {
   busy(true);
@@ -1072,7 +1090,13 @@ function renderIssueForm_(orderId) {
         title: 'เลือกชนิดน้ำมัน', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสน้ำมัน…'
       }) +
       '<label>จำนวนลิตรที่สั่งจ่าย</label><input id="f-qty" type="number" inputmode="decimal" value="' + esc(o['จำนวนลิตรที่ขอ']) + '">' +
-      '<label>สถานที่รับน้ำมัน</label><input id="f-place" placeholder="เช่น ปั๊ม ปตท. สาขา...">' +
+      '<label>สถานที่รับน้ำมัน</label>' +
+      comboField({
+        id: 'f-place', items: poLocationComboItems(),
+        value: o['สถานที่รับน้ำมัน'] || defaultPoLocationValue(),
+        title: 'เลือกสถานที่รับน้ำมัน (ปั๊ม/คลัง)', placeholder: 'แตะเพื่อเลือกปั๊ม/คลัง',
+        searchPlaceholder: 'พิมพ์ชื่อสาขาหรือรหัส…', clearable: true
+      }) +
       '<label>หมายเหตุ <span class="opt">(ไม่บังคับ)</span></label><input id="f-note">' +
       '<button class="btn-primary" onclick="doIssueOrder(\'' + esc(orderId) + '\')">ออกใบสั่ง + แจ้งคนขับ</button>' +
       '<button class="btn-secondary" onclick="renderClerk1()">ย้อนกลับ</button></div>';
