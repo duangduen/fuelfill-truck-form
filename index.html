@@ -245,7 +245,6 @@ var GET_ACTION_ARGS = {
   requestOrder: ['userId', 'payload'],
   cancelOrder: ['userId', 'orderId', 'reason'],
   issueOrder: ['userId', 'orderId', 'patch'],
-  recordLoad: ['userId', 'orderId', 'payload'],
   cancelFill: ['userId', 'fillId', 'reason'],
   editFill: ['userId', 'fillId', 'patch'],
   submitEndOfDay: ['userId', 'orderId', 'payload'],
@@ -255,7 +254,10 @@ var GET_ACTION_ARGS = {
   retryImport: ['userId', 'fillId']
 };
 // submitFill มีรูปแนบ — ลอง JSONP ก่อนถ้าสั้นพอ ไม่งั้น hidden-iframe form (pattern markMoved เดิม)
-var POST_ACTION_ARGS = { submitFill: ['userId', 'payload', 'photo'] };
+var POST_ACTION_ARGS = {
+  submitFill: ['userId', 'payload', 'photo'],
+  recordLoad: ['userId', 'orderId', 'payload', 'photo'] // รูปใบเสร็จปั๊ม
+};
 
 function callServer(fnName) {
   var args = Array.prototype.slice.call(arguments, 1);
@@ -678,60 +680,85 @@ function doRequestOrder() {
 }
 
 /* ---- รับน้ำมันเข้าถัง ---- */
+/*
+ * ตรงกับใบรายงานกระดาษ: "ยอดเบิก (ลิตร)" มาจากใบเสร็จ/ใบสั่งของปั๊ม ไม่ได้อ่านมิเตอร์ตู้ที่ปั๊ม
+ * มิเตอร์ที่บันทึกมีตัวเดียวคือ "เลขตู้จ่ายน้ำมัน" = มิเตอร์หัวจ่ายบนรถ (สะสมต่อเนื่อง)
+ * บันทึกตอนเริ่มวัน (ก่อน) และตอนปิดวัน (หลัง) — ผลต่างต้องเท่ากับรวมลิตรที่จ่ายให้เครื่องจักร
+ */
 function renderLoadForm(orderId) {
   busy(true);
   callServer('myOrders', CURRENT_USER.userId).then(function (orders) {
     busy(false);
     var o = orders.filter(function (x) { return x['Order ID'] === orderId; })[0];
     if (!o) { showToast('ไม่พบใบสั่ง'); renderDriverHome(); return; }
+    var issued = num(o['จำนวนลิตรที่สั่งจ่าย']);
     $('main').innerHTML =
       '<div class="card"><h3>🚛 บันทึกรับน้ำมันเข้าถัง — ' + esc(orderId) + '</h3>' +
-      '<div class="row muted">' + esc(o['รถน้ำมัน']) + ' | ' + esc(o['ชนิดน้ำมัน']) + ' | สั่งจ่าย ' + esc(o['จำนวนลิตรที่สั่งจ่าย']) + ' ล.</div>' +
-      '<div class="grid2">' +
-      '<div><label>เลขตู้จ่ายก่อนรับเข้า</label><input id="f-before" type="number" inputmode="decimal" oninput="calcLoad()"></div>' +
-      '<div><label>เลขตู้จ่ายหลังรับเข้า</label><input id="f-after" type="number" inputmode="decimal" oninput="calcLoad()"></div>' +
-      '</div>' +
-      '<label>ยอดน้ำมันคงค้างในถังก่อนรับ (ลิตร)</label><input id="f-carry" type="number" inputmode="decimal" oninput="calcLoad()">' +
+      '<div class="row muted">' + esc(o['รถน้ำมัน']) + ' | ' + esc(o['ชนิดน้ำมัน']) + ' | สั่งจ่าย ' + esc(o['จำนวนลิตรที่สั่งจ่าย']) + ' ล.' +
+      (o['สถานที่รับน้ำมัน'] ? ' | 📍 ' + esc(o['สถานที่รับน้ำมัน']) : '') + '</div>' +
+      '<label>ยอดเบิกจากปั๊ม / คลัง (ลิตร)</label>' +
+      '<input id="f-received" type="number" inputmode="decimal" value="' + (issued != null ? issued : '') + '" oninput="calcLoad()">' +
+      '<div class="hint">ตามใบเสร็จ/ใบส่งของของปั๊ม — ค่าเริ่มต้น = ยอดที่เสมียน 1 สั่งจ่าย แก้ได้ถ้าปั๊มจ่ายจริงไม่เท่า</div>' +
+      '<label>รูปใบเสร็จ / ใบส่งของจากปั๊ม</label>' +
+      '<input type="file" accept="image/*" capture="environment" id="f-receipt" onchange="previewReceipt()">' +
+      '<img id="receipt-preview" class="photo-preview" style="display:none">' +
+      '<div class="hint">ถ่ายให้เห็นจำนวนลิตรและวันที่ชัด ๆ — เสมียน 1 ใช้เทียบตอนตรวจรายงาน</div>' +
+      '<label>ยอดยกมาในถังก่อนรับ (ลิตร)</label><input id="f-carry" type="number" inputmode="decimal" oninput="calcLoad()">' +
       '<div class="hint" id="carry-hint">กำลังดึงยอดคงเหลือครั้งก่อน…</div>' +
-      '<label>เลขมิเตอร์หัวจ่ายบนรถ (เริ่มวัน)</label><input id="f-pumpstart" type="number" inputmode="decimal">' +
-      '<div class="hint">ใช้เป็นจุดตั้งต้นของลูกโซ่มิเตอร์ตอนจ่ายให้เครื่องจักร</div>' +
-      '<div class="calcbox" id="load-calc">รับเข้าจริง: —</div>' +
+      '<label>เลขตู้จ่ายน้ำมัน (ก่อน) <span class="opt">— มิเตอร์หัวจ่ายบนรถ</span></label>' +
+      '<input id="f-pumpstart" type="number" inputmode="decimal">' +
+      '<div class="hint" id="pump-hint">ช่องเดียวกับ "เลขตู้จ่ายน้ำมัน (ก่อน)" ในใบรายงานกระดาษ — ระบบดึงเลข (หลัง) ของวันก่อนมาให้ ถ้าไม่ตรงหน้ามิเตอร์ให้แก้ตามจริง</div>' +
+      '<div class="calcbox" id="load-calc">รวมในถังหลังรับ: —</div>' +
       '<button class="btn-primary" onclick="doRecordLoad(\'' + orderId + '\')">บันทึกรับน้ำมัน</button>' +
       '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>';
+    calcLoad();
     callServer('lastRemaining', o['รถน้ำมัน']).then(function (d) {
       if (d.remaining != null) {
         $('f-carry').value = d.remaining;
         $('carry-hint').textContent = 'ยอดคงเหลือวัดจริงจากใบสั่งก่อนหน้าของรถคันนี้ = ' + d.remaining + ' ล. (แก้ได้ถ้าวัดจริงต่างจากนี้)';
-        if (d.pumpMeter != null && !$('f-pumpstart').value) $('f-pumpstart').value = d.pumpMeter;
-        calcLoad();
       } else {
         $('carry-hint').textContent = 'ไม่พบข้อมูลครั้งก่อน — กรอกยอดที่วัดได้ในถังตอนนี้';
       }
+      if (d.pumpMeter != null && !$('f-pumpstart').value) {
+        $('f-pumpstart').value = d.pumpMeter;
+        $('pump-hint').textContent = 'ดึงจากเลขตู้จ่าย (หลัง) ของใบสั่งก่อนหน้า = ' + d.pumpMeter + ' — ถ้าไม่ตรงหน้ามิเตอร์ให้แก้ตามจริง';
+      }
+      calcLoad();
     }).catch(function () { $('carry-hint').textContent = 'ดึงยอดครั้งก่อนไม่สำเร็จ — กรอกเอง'; });
   }).catch(errBack);
 }
 function calcLoad() {
-  var b = num($('f-before').value), a = num($('f-after').value), c = num($('f-carry').value) || 0;
+  var r = num($('f-received').value), c = num($('f-carry').value) || 0;
   var el = $('load-calc');
-  if (b == null || a == null) { el.innerHTML = 'รับเข้าจริง: —'; return; }
-  var recv = Math.round((a - b) * 100) / 100;
-  el.innerHTML = 'รับเข้าจริง (ตามตู้จ่าย): <span class="big">' + recv + ' ล.</span>' +
-    '<br>รวมในถังหลังรับ: <b>' + Math.round((recv + c) * 100) / 100 + ' ล.</b>' +
-    (recv <= 0 ? '<br><span class="neg">เลขหลังรับต้องมากกว่าก่อนรับ</span>' : '');
+  if (r == null) { el.innerHTML = 'รวมในถังหลังรับ: —'; return; }
+  el.innerHTML = 'ยกมา ' + c + ' + เบิก <span class="big">' + r + '</span> = รวมในถัง <b>' +
+    Math.round((r + c) * 100) / 100 + ' ล.</b>' +
+    (r <= 0 ? '<br><span class="neg">ยอดเบิกต้องมากกว่า 0</span>' : '');
+}
+function previewReceipt() {
+  var f = $('f-receipt').files[0];
+  var img = $('receipt-preview');
+  if (!f) { img.style.display = 'none'; return; }
+  img.src = URL.createObjectURL(f);
+  img.style.display = 'block';
 }
 function doRecordLoad(orderId) {
-  var payload = {
-    meterBefore: $('f-before').value, meterAfter: $('f-after').value,
-    carryOver: $('f-carry').value, pumpMeterStart: $('f-pumpstart').value
-  };
+  var received = num($('f-received').value);
+  if (received == null || received <= 0) { showToast('กรอกยอดเบิก (ลิตร) ก่อน'); return; }
+  var payload = { received: received, carryOver: $('f-carry').value, pumpMeterStart: $('f-pumpstart').value };
   busy(true);
-  callServer('recordLoad', CURRENT_USER.userId, orderId, payload)
-    .then(function (d) { busy(false); showToast('บันทึกแล้ว รับเข้า ' + d.received + ' ลิตร'); renderDriverHome(); })
-    .catch(errToast);
+  compressPhoto($('f-receipt').files[0]).then(function (photo) {
+    return callServer('recordLoad', CURRENT_USER.userId, orderId, payload, photo);
+  }).then(function (d) {
+    busy(false);
+    showToast('บันทึกแล้ว รับเข้า ' + d.received + ' ลิตร' + (d.receiptUrl ? ' (แนบใบเสร็จแล้ว)' : ''));
+    renderDriverHome();
+  }).catch(errToast);
 }
 
 /* ---- ฟอร์มเติมให้เครื่องจักร ---- */
 var CURRENT_GPS = '';
+var LAST_FILL_SITE = {}; // orderId -> รหัสหน้างานที่เพิ่งบันทึก ใช้เป็นค่าเริ่มต้นรายการถัดไป
 function renderFillForm(orderId) {
   ensureMasters(['machines', 'sites', 'receivers'])
     .then(function () { renderFillForm_(orderId); }).catch(errBack);
@@ -762,6 +789,7 @@ function renderFillForm_(orderId) {
     '<label>หน้างาน</label>' +
     comboField({
       id: 'f-site', items: siteItems, title: 'เลือกหน้างาน',
+      value: LAST_FILL_SITE[orderId] || '', // จำหน้างานล่าสุดของใบสั่งนี้ (บนกระดาษเขียนชื่อหน้างานครั้งเดียวแล้วไล่ทีละคัน)
       placeholder: 'แตะเพื่อค้นหาหน้างาน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อหน้างาน…',
       onChange: siteHint
     }) +
@@ -781,12 +809,16 @@ function renderFillForm_(orderId) {
     '<label>รูปถ่ายเลขไมล์</label>' +
     '<input type="file" accept="image/*" capture="environment" id="f-photo" onchange="previewPhoto()">' +
     '<img id="photo-preview" class="photo-preview" style="display:none">' +
-    '<label>เลขมิเตอร์หัวจ่ายหลังเติม</label><input id="f-pumpafter" type="number" inputmode="decimal" oninput="meterHint()">' +
+    '<label>เลขตู้จ่ายน้ำมันหลังเติม <span class="opt">(มิเตอร์บนรถ)</span></label><input id="f-pumpafter" type="number" inputmode="decimal" oninput="meterHint()">' +
     '<div class="hint" id="meter-hint">เลขก่อนเติมระบบต่อให้อัตโนมัติจากรายการก่อนหน้า</div>' +
     '<label>วันเวลาเติม <span class="opt">(เว้นว่าง = ตอนนี้)</span></label><input id="f-datetime" placeholder="dd/mm/yyyy hh:mm">' +
     '<div class="hint" id="gps-hint">📡 กำลังขอพิกัด GPS…</div>' +
     '<button class="btn-primary" onclick="doSubmitFill(\'' + orderId + '\')">บันทึกการเติม</button>' +
     '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>';
+  if (LAST_FILL_SITE[orderId]) {
+    siteHint();
+    $('site-hint').textContent += ' — ใช้หน้างานเดียวกับรายการก่อน (แตะเปลี่ยนได้)';
+  }
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(function (pos) {
       CURRENT_GPS = pos.coords.latitude.toFixed(6) + ',' + pos.coords.longitude.toFixed(6);
@@ -889,6 +921,7 @@ function doSubmitFill(orderId) {
     return callServer('submitFill', CURRENT_USER.userId, payload, photo);
   }).then(function (d) {
     busy(false);
+    LAST_FILL_SITE[orderId] = site.code;
     var msg = 'บันทึกแล้ว: ' + d.fillId;
     if (d.flags && d.flags.length) msg += '\n🚩 ' + d.flags.join(', ');
     alert(msg + '\nจ่ายสะสม ' + d.totalSoFar + ' / มีในถัง ' + d.available + ' ล.');
@@ -956,7 +989,7 @@ function renderEodForm(orderId) {
       '<div class="card"><h3>🌇 ปิดวัน — ' + esc(orderId) + '</h3>' +
       '<div class="row">จ่ายวันนี้ <b>' + fills.length + ' รายการ รวม ' + totalOut + ' ลิตร</b></div>' +
       '<div class="row muted">ยกมา ' + carry + ' + รับเข้า ' + recv + ' − จ่าย ' + totalOut + ' = คงเหลือตามบัญชี <b>' + book + ' ล.</b></div>' +
-      '<label>เลขมิเตอร์หัวจ่ายสิ้นวัน</label><input id="f-pumpend" type="number" inputmode="decimal">' +
+      '<label>เลขตู้จ่ายน้ำมัน (หลัง) <span class="opt">— มิเตอร์บนรถ ตอนปิดวัน</span></label><input id="f-pumpend" type="number" inputmode="decimal">' +
       '<label>ลิตรคงเหลือในถัง (วัดจริง)</label><input id="f-measured" type="number" inputmode="decimal" oninput="calcEod()">' +
       '<div class="calcbox" id="eod-calc">ผลต่าง: —</div>' +
       '<label>หมายเหตุ <span class="opt">(ไม่บังคับ)</span></label><input id="f-note">' +
@@ -1138,11 +1171,12 @@ function renderReviewDetail(orderId) {
       '<div class="card"><h3>📮 ตรวจรายงาน — ' + esc(orderId) + '</h3>' +
       '<div class="row">👤 ' + esc(o['คนขับรถน้ำมัน']) + ' | 🚛 ' + esc(o['รถน้ำมัน']) + ' | 🛢 ' + esc(o['ชนิดน้ำมัน']) + '</div>' +
       '<div class="calcbox">ยกมา ' + esc(o['ยอดยกมาในถัง (ลิตร)']) + ' + รับเข้า ' + esc(o['ลิตรรับเข้าจริง']) +
-      ' (ตู้จ่าย ' + esc(o['เลขตู้จ่ายก่อนรับ']) + '→' + esc(o['เลขตู้จ่ายหลังรับ']) + ')' +
+      (o['รูปใบเสร็จรับน้ำมัน'] ? ' <a href="' + esc(o['รูปใบเสร็จรับน้ำมัน']) + '" target="_blank">📷 ใบเสร็จ</a>'
+        : ' <span class="neg">(ไม่มีรูปใบเสร็จ)</span>') +
       ' − จ่าย ' + esc(o['รวมลิตรจ่าย']) + ' = บัญชี <b>' + esc(o['ลิตรคงเหลือตามบัญชี']) + '</b> ล.' +
       '<br>วัดจริง <b>' + esc(o['ลิตรคงเหลือวัดจริง']) + '</b> ล. → ผลต่าง ' +
       '<span class="big ' + (v != null && Math.abs(v) > 20 ? 'neg' : '') + '">' + esc(o['ผลต่าง (ลิตร)']) + ' ล.</span>' +
-      '<br>มิเตอร์หัวจ่าย ' + esc(o['เลขมิเตอร์หัวจ่ายเริ่มต้น']) + ' → ' + esc(o['เลขมิเตอร์หัวจ่ายสิ้นวัน']) + '</div>' +
+      '<br>เลขตู้จ่าย (ก่อน→หลัง) ' + esc(o['เลขมิเตอร์หัวจ่ายเริ่มต้น']) + ' → ' + esc(o['เลขมิเตอร์หัวจ่ายสิ้นวัน']) + '</div>' +
       '<div class="tablewrap" style="margin-top:10px"><table><tr><th>Fill</th><th>เวลา</th><th>เครื่องจักร</th><th>หน้างาน</th><th>ลิตร</th><th>ผู้รับ</th><th>เลขไมล์</th><th>มิเตอร์</th><th>ธง</th><th></th></tr>' +
       rowsHtml + '</table></div>' +
       '<button class="btn-primary" onclick="doApproveReport(\'' + esc(orderId) + '\')">✅ ตรวจแล้วถูกต้อง — ส่งเข้าคิวนำเข้าฐานข้อมูล</button>' +
