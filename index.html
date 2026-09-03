@@ -547,6 +547,20 @@ var MASTER_LOADERS = {
   poLocations: { action: 'poLocationList', label: 'สถานที่รับน้ำมัน' },
   receivers: { action: 'receiverList', label: 'รายชื่อผู้รับน้ำมัน' }
 };
+/* ---- รายการหน้างานสำหรับ dropdown (ใช้ร่วมทุกหน้าจอ) ----
+   แสดงเฉพาะ "ชื่อหน้างาน" ไม่มีรหัสนำหน้า และเรียงตามตัวอักษร (ผู้ใช้ขอ 3 ก.ย. 2569)
+   รหัสยังค้นหาได้อยู่ เพราะ comboRenderList() ค้นจาก it.v ด้วย และโชว์รหัสไว้บรรทัดล่างเป็นตัวจาง */
+function thaiCmp_(a, b) {
+  a = String(a || ''); b = String(b || '');
+  try { return a.localeCompare(b, 'th'); } catch (e) { return a < b ? -1 : (a > b ? 1 : 0); }
+}
+function siteItems_() {
+  return MASTERS.sites.map(function (s) {
+    var sub = 'รหัส ' + s.code + (s.projectid ? ' · โครงการ ' + s.projectid : '');
+    return { v: s.code, label: s.name || s.code, sub: sub };
+  }).sort(function (x, y) { return thaiCmp_(x.label, y.label); });
+}
+
 function loadMasters() {
   Object.keys(MASTER_LOADERS).forEach(function (k) { loadMaster_(k).catch(function () {}); });
 }
@@ -868,9 +882,7 @@ function renderFillForm_(orderId) {
       sub: m.lastmile ? 'เลขไมล์ล่าสุดในระบบ ' + m.lastmile : ''
     };
   });
-  var siteItems = MASTERS.sites.map(function (s) {
-    return { v: s.code, label: s.code + ' | ' + s.name, sub: s.projectid ? 'โครงการ ' + s.projectid : '' };
-  });
+  var siteItems = siteItems_();
   var receiverItems = MASTERS.receivers.map(function (d) {
     return { v: d.code + ' | ' + d.name, label: d.name, sub: 'รหัส ' + d.code };
   });
@@ -887,7 +899,7 @@ function renderFillForm_(orderId) {
     comboField({
       id: 'f-site', items: siteItems, title: 'เลือกหน้างาน',
       value: LAST_FILL_SITE[orderId] || '', // จำหน้างานล่าสุดของใบสั่งนี้ (บนกระดาษเขียนชื่อหน้างานครั้งเดียวแล้วไล่ทีละคัน)
-      placeholder: 'แตะเพื่อค้นหาหน้างาน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อหน้างาน…',
+      placeholder: 'แตะเพื่อค้นหาหน้างาน', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสหน้างาน…',
       onChange: siteHint
     }) +
     '<div class="hint" id="site-hint"></div>' +
@@ -1309,9 +1321,7 @@ function renderEditFill_(fillId, orderId) {
     var machineItems = MASTERS.machines.map(function (m) {
       return { v: m.code, label: m.code + ' | ' + (m.name || ''), sub: m.lastmile ? 'เลขไมล์ล่าสุด ' + m.lastmile : '' };
     });
-    var siteItems = MASTERS.sites.map(function (s) {
-      return { v: s.code, label: s.code + ' | ' + s.name, sub: s.projectid ? 'โครงการ ' + s.projectid : '' };
-    });
+    var siteItems = siteItems_();
     var receiverItems = MASTERS.receivers.map(function (d) {
       return { v: d.code, label: d.code + ' | ' + d.name, sub: '' };
     });
@@ -1327,7 +1337,7 @@ function renderEditFill_(fillId, orderId) {
       '<label>รหัสหน้างาน</label>' +
       comboField({
         id: 'e-site', items: siteItems, value: f['รหัสหน้างาน (siteid)'],
-        title: 'เลือกหน้างาน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อหน้างาน…'
+        title: 'เลือกหน้างาน', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสหน้างาน…'
       }) +
       '<div class="grid2">' +
       '<div><label>จำนวนลิตร</label><input id="e-qty" type="number" value="' + esc(f['จำนวนลิตร']) + '"></div>' +
@@ -1595,7 +1605,9 @@ function renderAp(tab) {
         var k = String(r['วันเวลาบันทึก']).slice(0, 10) + ' | ' + r['สถานที่รับน้ำมัน'];
         (groups[k] = groups[k] || []).push(r);
       });
-      html += '<div class="card"><div class="muted">ติ๊กใบที่คีย์เข้า materialdb.fuel_ap แล้ว ใส่เลขที่เอกสาร (ถ้ามี) แล้วกดยืนยันด้านล่าง</div>' +
+      var failed = rows.filter(function (r) { return r['สถานะ fuel_ap'] === 'นำเข้า fuel_ap ไม่สำเร็จ'; });
+      html += '<div class="card"><div class="muted">ระบบนำเข้า materialdb (fuel_po/fuel_ap) ให้อัตโนมัติทุกคืน — รายการด้านล่างคือใบที่ยังไม่ได้นำเข้า' +
+        (failed.length ? '<br><b style="color:var(--c-danger)">⚠️ นำเข้าไม่สำเร็จ ' + failed.length + ' ใบ</b> ดูสาเหตุในแถวสีแดง แจ้งเสมียนปั๊ม 1 แก้ราคา/ยอดเงิน แล้วระบบจะลองใหม่คืนถัดไป' : '') + '</div>' +
         '<div class="tablewrap" style="margin-top:8px"><table><tr><th><input type="checkbox" onchange="document.querySelectorAll(\'.ap-cb\').forEach(function(c){c.checked=this.checked},this)"></th>' +
         '<th>วันที่ / ปั๊ม</th><th>ใบเสร็จ</th><th>รถ</th><th>น้ำมัน</th><th>ลิตร</th><th>ราคา</th><th>บาท</th></tr>';
       var total = 0, totalL = 0;
@@ -1603,8 +1615,9 @@ function renderAp(tab) {
         html += '<tr><td colspan="8" style="background:#eef3f0;font-weight:600">' + esc(k) + ' (' + groups[k].length + ' ใบ)</td></tr>';
         groups[k].forEach(function (r) {
           total += num(r['จำนวนเงิน']) || 0; totalL += num(r['จำนวนลิตร']) || 0;
-          html += '<tr><td><input type="checkbox" class="ap-cb" value="' + esc(r['Receipt ID']) + '"></td>' +
-            '<td>' + esc(r['วันเวลาบันทึก']) + '</td>' +
+          var isFail = r['สถานะ fuel_ap'] === 'นำเข้า fuel_ap ไม่สำเร็จ';
+          html += '<tr' + (isFail ? ' style="background:#fdecea"' : '') + '><td><input type="checkbox" class="ap-cb" value="' + esc(r['Receipt ID']) + '"></td>' +
+            '<td>' + esc(r['วันเวลาบันทึก']) + (isFail ? '<br><span style="color:var(--c-danger);font-size:12px">❌ ' + esc(r['ข้อความ error fuel_ap'] || 'นำเข้าไม่สำเร็จ') + '</span>' : '') + '</td>' +
             '<td>' + esc(r['Receipt ID']) + (r['รูปใบเสร็จ'] ? ' <a href="' + esc(r['รูปใบเสร็จ']) + '" target="_blank">📷</a>' : '') + '<br><span class="muted">' + esc(r['เลขที่ใบเสร็จ'] || '-') + '</span></td>' +
             '<td>' + esc(r['รถน้ำมัน']) + '</td><td>' + esc(r['ชนิดน้ำมัน']) + '</td>' +
             '<td style="text-align:right">' + esc(r['จำนวนลิตร']) + '</td><td style="text-align:right">' + esc(r['ราคาต่อลิตร']) + '</td>' +
@@ -1612,8 +1625,9 @@ function renderAp(tab) {
         });
       });
       html += '<tr><td colspan="5" style="text-align:right"><b>รวมค้าง</b></td><td style="text-align:right"><b>' + totalL.toLocaleString() + '</b></td><td></td><td style="text-align:right"><b>' + money(total) + '</b></td></tr></table></div>' +
-        '<label>เลขที่เอกสาร fuel_ap <span class="opt">(ไม่บังคับ — ใส่ถ้าคีย์เป็นเอกสารเดียวกัน)</span></label><input id="ap-docno" placeholder="เช่น AP1006900123">' +
-        '<button class="btn-primary" onclick="doMarkAp()">✅ ยืนยันว่าคีย์ fuel_ap แล้ว (ใบที่เลือก)</button></div>';
+        '<details style="margin-top:10px"><summary class="muted">คีย์มือแทนระบบ (กรณีพิเศษ)</summary>' +
+        '<label>เลขที่เอกสาร fuel_ap <span class="opt">(ไม่บังคับ — ใส่ถ้าคีย์เป็นเอกสารเดียวกัน)</span></label><input id="ap-docno" placeholder="เช่น TA1006900123">' +
+        '<button class="btn-secondary" onclick="doMarkAp()">✅ ยืนยันว่าคีย์ fuel_ap แล้ว (ใบที่เลือก)</button></details></div>';
       $('main').innerHTML = html;
     }).catch(errBack);
   } else {
