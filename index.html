@@ -571,6 +571,14 @@ function thaiCmp_(a, b) {
   a = String(a || ''); b = String(b || '');
   try { return a.localeCompare(b, 'th'); } catch (e) { return a < b ? -1 : (a > b ? 1 : 0); }
 }
+function machineItems_() {
+  return MASTERS.machines.map(function (m) {
+    var sub = [];
+    if (m.drvName) sub.push('คนขับประจำ ' + m.drvName);
+    if (m.lastmile) sub.push('เลขไมล์ล่าสุด ' + m.lastmile);
+    return { v: m.code, label: m.code + (m.name ? ' | ' + m.name : ''), sub: sub.join(' · ') };
+  });
+}
 function siteItems_() {
   return MASTERS.sites.map(function (s) {
     var sub = 'รหัส ' + s.code + (s.projectid ? ' · โครงการ ' + s.projectid : '');
@@ -929,12 +937,8 @@ var CURRENT_RECEIPT_KEY = ''; // เช่นเดียวกันสำห�
 function renderFillForm_(orderId) {
   CURRENT_GPS = '';
   CURRENT_FILL_KEY = newClientKey();
-  var machineItems = MASTERS.machines.map(function (m) {
-    return {
-      v: m.code, label: m.code + (m.name ? ' | ' + m.name : ''),
-      sub: m.lastmile ? 'เลขไมล์ล่าสุดในระบบ ' + m.lastmile : ''
-    };
-  });
+  RECEIVER_AUTO_VALUE = '';
+  var machineItems = machineItems_();
   var siteItems = siteItems_();
   var receiverItems = MASTERS.receivers.map(function (d) {
     return { v: d.code + ' | ' + d.name, label: d.name, sub: 'รหัส ' + d.code };
@@ -988,6 +992,28 @@ function renderFillForm_(orderId) {
     }, function () { $('gps-hint').textContent = '📡 ไม่ได้พิกัด (ไม่บังคับ)'; }, { timeout: 8000 });
   } else { $('gps-hint').textContent = '📡 อุปกรณ์ไม่รองรับ GPS (ไม่บังคับ)'; }
 }
+/* ---- ผู้รับน้ำมันตั้งต้นจาก "คนขับประจำ" ของเครื่องจักร (car_mst.drv_code) — ผู้ใช้ขอ 3 ก.ย. 2569 ----
+   เติมให้เมื่อช่องผู้รับยังว่าง หรือค่าในช่องคือค่าที่ระบบเติมให้เอง (ไม่ทับค่าที่คนขับเลือกเองไว้)
+   ถ้าคนขับประจำไม่อยู่ในรายชื่อ drv_mst ที่ใช้งาน (ลาออก/ถูกปิด) จะไม่เติม แต่บอกไว้ในคำแนะนำ */
+var RECEIVER_AUTO_VALUE = ''; // ค่าที่ระบบเติมให้ล่าสุด ใช้แยกว่าคนขับเปลี่ยนเองหรือยัง
+function defaultReceiverOf_(m) {
+  if (!m || !m.drvCode) return null;
+  var hit = MASTERS.receivers.filter(function (d) { return d.code === m.drvCode; })[0];
+  return hit ? { v: hit.code + ' | ' + hit.name, name: hit.name } : { v: '', name: m.drvName || m.drvCode, inactive: true };
+}
+function autoFillReceiver_(receiverId, m, hintEl) {
+  var cur = ($(receiverId) || {}).value || '';
+  if (cur && cur !== RECEIVER_AUTO_VALUE) return; // คนขับเลือกเองแล้ว ไม่ยุ่ง
+  var d = defaultReceiverOf_(m);
+  if (!d) { if (cur === RECEIVER_AUTO_VALUE && cur) { comboSetValue(receiverId, ''); RECEIVER_AUTO_VALUE = ''; } return; }
+  if (d.inactive) {
+    if (hintEl) { hintEl.textContent = 'คนขับประจำ "' + d.name + '" ไม่อยู่ในรายชื่อที่ใช้งาน — เลือกผู้รับเอง'; hintEl.className = 'hint'; }
+    return;
+  }
+  comboSetValue(receiverId, d.v);
+  RECEIVER_AUTO_VALUE = d.v;
+  if (hintEl) { hintEl.textContent = '✓ ตั้งต้นจากคนขับประจำของรถคันนี้: ' + d.name + ' (แตะเพื่อเปลี่ยนได้)'; hintEl.className = 'hint'; }
+}
 function machineHint() {
   var code = $('f-machine').value.trim();
   var m = MASTERS.machines.filter(function (x) { return x.code === code; })[0];
@@ -996,6 +1022,7 @@ function machineHint() {
   if (m) {
     el.textContent = '✓ ' + m.code + ' ' + (m.name || '') + (m.lastmile ? ' | เลขไมล์ล่าสุดในระบบ: ' + m.lastmile : '');
     el.className = 'hint';
+    autoFillReceiver_('f-receiver', m, $('receiver-hint'));
   } else {
     el.textContent = '✗ ไม่พบในทะเบียน — เลือกจากรายการเท่านั้น (เครื่องใหม่ให้แจ้งเสมียน 1)';
     el.className = 'hint error';
@@ -1165,12 +1192,11 @@ function renderMyFillEdit(fillId, orderId, backTo) {
     busy(false);
     var f = fills.filter(function (x) { return x['Fill ID'] === fillId; })[0];
     if (!f) { showToast('ไม่พบรายการ'); renderOrderFills(orderId, backTo); return; }
-    var machineItems = MASTERS.machines.map(function (m) {
-      return { v: m.code, label: m.code + (m.name ? ' | ' + m.name : ''), sub: m.lastmile ? 'เลขไมล์ล่าสุดในระบบ ' + m.lastmile : '' };
-    });
+    var machineItems = machineItems_();
     var receiverItems = MASTERS.receivers.map(function (d) {
       return { v: d.code + ' | ' + d.name, label: d.name, sub: 'รหัส ' + d.code };
     });
+    RECEIVER_AUTO_VALUE = '';
     var curReceiver = f['รหัสผู้รับ (driver_id)']
       ? f['รหัสผู้รับ (driver_id)'] + ' | ' + f['ผู้รับน้ำมัน'] : (f['ผู้รับน้ำมัน'] || '');
     $('main').innerHTML =
@@ -1178,7 +1204,11 @@ function renderMyFillEdit(fillId, orderId, backTo) {
       '<div class="muted">แก้ได้จนถึงก่อนส่งรายงานปิดวัน ทุกการแก้ถูกบันทึกใน Log และแจ้งเสมียน 1 ตอนตรวจ</div>' +
       '<label>เครื่องจักร</label>' +
       comboField({ id: 'm-machine', items: machineItems, value: f['รหัสเครื่องจักร'],
-        title: 'เลือกเครื่องจักรจากทะเบียน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อเครื่องจักร…' }) +
+        title: 'เลือกเครื่องจักรจากทะเบียน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อเครื่องจักร…',
+        onChange: function (code) {
+          var m = MASTERS.machines.filter(function (x) { return x.code === code; })[0];
+          autoFillReceiver_('m-receiver', m, null);
+        } }) +
       '<label>หน้างาน</label>' +
       comboField({ id: 'm-site', items: siteItems_(), value: f['รหัสหน้างาน (siteid)'],
         title: 'เลือกหน้างาน', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสหน้างาน…' }) +
