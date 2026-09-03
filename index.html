@@ -117,10 +117,11 @@
     font-size: 14px; z-index: 99; display: none; max-width: 90%; text-align: center;
   }
   .spinner {
-    display: none; position: fixed; inset: 0; background: rgba(255,255,255,.6);
-    z-index: 98; align-items: center; justify-content: center;
+    display: none; position: fixed; inset: 0; background: rgba(255,255,255,.75);
+    z-index: 98; align-items: center; justify-content: center; flex-direction: column; gap: 12px;
   }
-  .spinner div {
+  #spinner-msg { font-size: 14px; color: var(--c-text); text-align: center; max-width: 80%; line-height: 1.5; }
+  .spinner div.sp-ring {
     width: 42px; height: 42px; border: 4px solid var(--c-border); border-top-color: var(--c-primary);
     border-radius: 50%; animation: spin 1s linear infinite;
   }
@@ -162,7 +163,7 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
-<div class="spinner" id="spinner"><div></div></div>
+<div class="spinner" id="spinner"><div class="sp-ring"></div><div id="spinner-msg"></div></div>
 
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script>
@@ -248,6 +249,7 @@ var GET_ACTION_ARGS = {
   issueOrder: ['userId', 'orderId', 'patch'],
   cancelFill: ['userId', 'fillId', 'reason'],
   editFill: ['userId', 'fillId', 'patch'],
+  editMyFill: ['userId', 'fillId', 'patch'],
   submitEndOfDay: ['userId', 'orderId', 'payload'],
   approveDailyReport: ['userId', 'orderId'],
   rejectDailyReport: ['userId', 'orderId', 'reason'],
@@ -445,7 +447,22 @@ function showToast(msg) {
   clearTimeout(window.__toastTimer);
   window.__toastTimer = setTimeout(function () { el.style.display = 'none'; }, 3500);
 }
-function busy(on) { $('spinner').style.display = on ? 'flex' : 'none'; }
+function busy(on, msg) {
+  $('spinner').style.display = on ? 'flex' : 'none';
+  $('spinner-msg').textContent = on ? (msg || '') : '';
+}
+/* ---- กันบันทึกซ้ำ (ปัญหาจริง 3 ก.ย. 2569: เน็ตช้า แอปขึ้น error แต่ข้อมูลเข้าชีตแล้ว คนขับกดซ้ำเลยได้ 2 แถว) ----
+   clientKey = รหัสสุ่ม 1 ค่าต่อ 1 ฟอร์ม ส่งไปกับ payload; เซิร์ฟเวอร์เจอค่าซ้ำจะคืนแถวเดิมแทนการเพิ่มใหม่
+   ค่าจะถูกสร้างใหม่เมื่อบันทึกสำเร็จเท่านั้น — กดซ้ำระหว่างที่ยังไม่รู้ผลจึงปลอดภัยเสมอ */
+function newClientKey() {
+  return 'ck' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+var SUBMITTING = false; // กันกดรัวระหว่างรอเซิร์ฟเวอร์ (ปุ่มถูก disable ด้วย)
+function lockSubmit(btnId, on, label) {
+  SUBMITTING = on;
+  var b = btnId && $(btnId);
+  if (b) { b.disabled = on; if (label) b.textContent = label; }
+}
 function statusChip(status) {
   var cls = '';
   if (/รอ|กำลัง/.test(status)) cls = 'warn';
@@ -740,7 +757,7 @@ function renderLoadForm(orderId) {
       '<div><label>จำนวนลิตรในใบนี้</label><input id="rc-liters" type="number" inputmode="decimal" placeholder="เช่น 800"></div>' +
       '<div><label>เลขที่ใบเสร็จ <span class="opt">(ไม่บังคับ)</span></label><input id="rc-no" placeholder="ตามหัวใบเสร็จ"></div>' +
       '</div>' +
-      '<button class="btn-primary" onclick="doAddReceipt(\'' + orderId + '\')">💾 บันทึกใบเสร็จนี้</button>' +
+      '<button class="btn-primary" id="btn-save-receipt" onclick="doAddReceipt(\'' + orderId + '\')">💾 บันทึกใบเสร็จนี้</button>' +
       '<button class="btn-secondary btn-small" onclick="toggleReceiptAdd(false)">ยกเลิก</button>' +
       '</div>' +
       '<button class="btn-secondary" id="btn-add-receipt" onclick="toggleReceiptAdd(true)">➕ เพิ่มใบเสร็จ</button>' +
@@ -810,7 +827,11 @@ function renderReceiptList(d) {
 function toggleReceiptAdd(show) {
   $('receipt-add').style.display = show ? 'block' : 'none';
   $('btn-add-receipt').style.display = show ? 'none' : 'block';
-  if (show) { $('rc-liters').value = ''; $('rc-no').value = ''; $('rc-photo').value = ''; $('receipt-preview').style.display = 'none'; }
+  if (show) {
+    $('rc-liters').value = ''; $('rc-no').value = ''; $('rc-photo').value = '';
+    $('receipt-preview').style.display = 'none';
+    CURRENT_RECEIPT_KEY = newClientKey(); // เปิดฟอร์มใบใหม่ = กุญแจกันซ้ำใหม่
+  }
 }
 function previewReceipt() {
   var f = $('rc-photo').files[0];
@@ -823,18 +844,47 @@ function doAddReceipt(orderId) {
   var liters = num($('rc-liters').value);
   if (liters == null || liters <= 0) { showToast('กรอกจำนวนลิตรในใบเสร็จก่อน'); return; }
   if (!$('rc-photo').files[0]) { showToast('ถ่ายรูปใบเสร็จก่อน — ปั๊มต้องใช้เทียบสำเนา'); return; }
-  busy(true);
+  if (SUBMITTING) { showToast('กำลังบันทึกอยู่ รอสักครู่…'); return; }
+  if (!CURRENT_RECEIPT_KEY) CURRENT_RECEIPT_KEY = newClientKey();
+  lockSubmit('btn-save-receipt', true, '⏳ กำลังบันทึก…');
+  busy(true, 'กำลังย่อรูปใบเสร็จ…');
   compressPhoto($('rc-photo').files[0]).then(function (photo) {
     if (!photo) throw new Error('อ่านรูปไม่ได้ ลองถ่ายใหม่');
-    return callServer('addReceipt', CURRENT_USER.userId, orderId, { liters: liters, receiptNo: $('rc-no').value.trim() }, photo);
-  }).then(function () {
-    return callServer('receiptsOfOrder', CURRENT_USER.userId, orderId);
-  }).then(function (d) {
+    busy(true, 'กำลังส่งใบเสร็จขึ้นเซิร์ฟเวอร์…\nเน็ตช้าอาจใช้เวลาถึง 1 นาที ไม่ต้องกดซ้ำ');
+    return callServer('addReceipt', CURRENT_USER.userId, orderId,
+      { liters: liters, receiptNo: $('rc-no').value.trim(), clientKey: CURRENT_RECEIPT_KEY }, photo);
+  }).then(function (r) {
+    finishReceipt_(orderId, r && r.duplicate);
+  }).catch(function (err) {
+    // เช็คก่อนว่าใบเสร็จเข้าไปแล้วหรือยัง (เน็ตช้าจนหมดเวลา แต่เซิร์ฟเวอร์บันทึกสำเร็จ)
+    busy(true, 'ตรวจสอบกับเซิร์ฟเวอร์ว่าบันทึกสำเร็จหรือยัง…');
+    callServer('receiptsOfOrder', CURRENT_USER.userId, orderId).then(function (d) {
+      var hit = (d.receipts || []).filter(function (r) { return r['Client Key'] === CURRENT_RECEIPT_KEY; })[0];
+      if (hit) { finishReceipt_(orderId, true); return; }
+      lockSubmit('btn-save-receipt', false, '💾 บันทึกใบเสร็จนี้');
+      busy(false);
+      showToast('❌ ยังไม่ได้บันทึก: ' + err.message + ' — กดบันทึกใหม่ได้ ระบบกันซ้ำให้แล้ว');
+    }).catch(function () {
+      lockSubmit('btn-save-receipt', false, '💾 บันทึกใบเสร็จนี้');
+      busy(false);
+      showToast('⚠️ ส่งไม่สำเร็จและเช็คสถานะไม่ได้ — เช็คสัญญาณแล้วกดใหม่');
+    });
+  });
+}
+function finishReceipt_(orderId, wasDuplicate) {
+  CURRENT_RECEIPT_KEY = newClientKey(); // ใบถัดไปใช้กุญแจใหม่
+  busy(true, 'กำลังโหลดรายการใบเสร็จ…');
+  callServer('receiptsOfOrder', CURRENT_USER.userId, orderId).then(function (d) {
+    lockSubmit('btn-save-receipt', false, '💾 บันทึกใบเสร็จนี้');
     busy(false);
     toggleReceiptAdd(false);
     renderReceiptList(d);
-    showToast('บันทึกใบเสร็จแล้ว รวม ' + d.count + ' ใบ = ' + d.total + ' ล.');
-  }).catch(errToast);
+    showToast((wasDuplicate ? 'ใบนี้บันทึกไว้แล้ว (ไม่ซ้ำ) — ' : 'บันทึกใบเสร็จแล้ว ') + 'รวม ' + d.count + ' ใบ = ' + d.total + ' ล.');
+  }).catch(function (e) {
+    lockSubmit('btn-save-receipt', false, '💾 บันทึกใบเสร็จนี้');
+    busy(false);
+    showToast('บันทึกแล้ว แต่โหลดรายการใหม่ไม่ได้: ' + e.message);
+  });
 }
 function doCancelReceipt(receiptId) {
   if (!confirm('ลบใบเสร็จ ' + receiptId + ' ?')) return;
@@ -874,8 +924,11 @@ function renderFillForm(orderId) {
   ensureMasters(['machines', 'sites', 'receivers'])
     .then(function () { renderFillForm_(orderId); }).catch(errBack);
 }
+var CURRENT_FILL_KEY = '';    // กุญแจกันบันทึกซ้ำของ "ฟอร์มเติมที่เปิดอยู่"
+var CURRENT_RECEIPT_KEY = ''; // เช่นเดียวกันสำหรับฟอร์มเพิ่มใบเสร็จ
 function renderFillForm_(orderId) {
   CURRENT_GPS = '';
+  CURRENT_FILL_KEY = newClientKey();
   var machineItems = MASTERS.machines.map(function (m) {
     return {
       v: m.code, label: m.code + (m.name ? ' | ' + m.name : ''),
@@ -922,7 +975,7 @@ function renderFillForm_(orderId) {
     '<div class="hint" id="meter-hint">เลขก่อนเติมระบบต่อให้อัตโนมัติจากรายการก่อนหน้า</div>' +
     '<label>วันเวลาเติม <span class="opt">(เว้นว่าง = ตอนนี้)</span></label><input id="f-datetime" placeholder="dd/mm/yyyy hh:mm">' +
     '<div class="hint" id="gps-hint">📡 กำลังขอพิกัด GPS…</div>' +
-    '<button class="btn-primary" onclick="doSubmitFill(\'' + orderId + '\')">บันทึกการเติม</button>' +
+    '<button class="btn-primary" id="btn-submit-fill" onclick="doSubmitFill(\'' + orderId + '\')">💾 บันทึกการเติม</button>' +
     '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>';
   if (LAST_FILL_SITE[orderId]) {
     siteHint();
@@ -958,8 +1011,10 @@ function siteHint() {
 }
 function meterHint() { /* ผลต่างมิเตอร์เทียบลิตรตรวจฝั่ง server — ที่นี่แค่บอกใบ้ */ }
 /** แยกค่าในช่องผู้รับ: "รหัส | ชื่อ" (เลือกจากลิสต์) หรือชื่อ/รหัสที่พิมพ์เอง -> {code, name} */
-function parseReceiver() {
-  var v = $('f-receiver').value.trim();
+function parseReceiver() { return parseReceiverValue_($('f-receiver').value); }
+/** แปลงค่าในช่องผู้รับ ('sp01 | สมชาย' หรือชื่ออิสระ) -> {code, name} — ใช้ทั้งฟอร์มบันทึกและฟอร์มแก้ไข */
+function parseReceiverValue_(raw) {
+  var v = String(raw || '').trim();
   if (!v) return { code: '', name: '' };
   var m = v.split(' | ');
   if (m.length === 2) {
@@ -993,13 +1048,13 @@ function compressPhoto(file) {
     if (!file) { resolve(null); return; }
     var img = new Image();
     img.onload = function () {
-      var maxW = 1280;
+      var maxW = 1000; // เดิม 1280 — เล็กลงนิดเดียวแต่ไฟล์เบาลง ~40% อัปโหลดผ่าน 4G ที่หน้างานเร็วขึ้นชัด
       var scale = Math.min(1, maxW / img.width);
       var canvas = document.createElement('canvas');
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
       canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-      var dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.65); // อ่านเลขไมล์/ใบเสร็จยังชัดพอ
       resolve({ base64: dataUrl.split(',')[1], mimeType: 'image/jpeg', filename: (file.name || 'photo') + '.jpg' });
     };
     img.onerror = function () { resolve(null); };
@@ -1025,17 +1080,47 @@ function doSubmitFill(orderId) {
     mileage: $('f-mileage').value, pumpMeterAfter: $('f-pumpafter').value,
     fillDateTime: $('f-datetime').value.trim(), gps: CURRENT_GPS
   };
-  busy(true);
+  if (SUBMITTING) { showToast('กำลังบันทึกอยู่ รอสักครู่…'); return; }
+  payload.clientKey = CURRENT_FILL_KEY;
+
+  lockSubmit('btn-submit-fill', true, '⏳ กำลังบันทึก…');
+  busy(true, 'กำลังย่อรูป…');
+  var hasPhoto = !!$('f-photo').files[0];
   compressPhoto($('f-photo').files[0]).then(function (photo) {
+    busy(true, hasPhoto ? 'กำลังส่งข้อมูล + รูปขึ้นเซิร์ฟเวอร์…\nเน็ตช้าอาจใช้เวลาถึง 1 นาที\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ' : 'กำลังส่งข้อมูล…');
     return callServer('submitFill', CURRENT_USER.userId, payload, photo);
   }).then(function (d) {
-    busy(false);
-    LAST_FILL_SITE[orderId] = site.code;
-    var msg = 'บันทึกแล้ว: ' + d.fillId;
-    if (d.flags && d.flags.length) msg += '\n🚩 ' + d.flags.join(', ');
-    alert(msg + '\nจ่ายสะสม ' + d.totalSoFar + ' / มีในถัง ' + d.available + ' ล.');
-    renderDriverHome();
-  }).catch(errToast);
+    finishFill_(orderId, site.code, d);
+  }).catch(function (err) {
+    // ส่งไม่ผ่าน/หมดเวลา — อาจบันทึกสำเร็จแล้วก็ได้ ตรวจกับเซิร์ฟเวอร์ก่อนบอกผู้ใช้ว่า error
+    busy(true, 'ตรวจสอบกับเซิร์ฟเวอร์ว่าบันทึกสำเร็จหรือยัง…');
+    callServer('fillsOfOrder', CURRENT_USER.userId, orderId).then(function (fills) {
+      var hit = fills.filter(function (f) { return f['Client Key'] === CURRENT_FILL_KEY; })[0];
+      if (hit) {
+        finishFill_(orderId, site.code, { fillId: hit['Fill ID'], flags: String(hit['ธงเตือน'] || '').split(',').filter(String), recovered: true });
+      } else {
+        lockSubmit('btn-submit-fill', false, '💾 บันทึกการเติม');
+        busy(false);
+        alert('❌ ยังไม่ได้บันทึก: ' + err.message + '\n\nข้อมูลในฟอร์มยังอยู่ครบ กด "บันทึกการเติม" ใหม่ได้เลย ระบบกันการบันทึกซ้ำให้แล้ว');
+      }
+    }).catch(function () {
+      lockSubmit('btn-submit-fill', false, '💾 บันทึกการเติม');
+      busy(false);
+      alert('⚠️ ส่งข้อมูลไม่สำเร็จ และตรวจสอบกับเซิร์ฟเวอร์ไม่ได้ (' + err.message + ')\n\nเช็คสัญญาณแล้วกดบันทึกใหม่ — ถ้ารายการเข้าไปแล้วระบบจะไม่บันทึกซ้ำ');
+    });
+  });
+}
+/** จบการบันทึก 1 รายการ — ใช้ทั้งกรณีสำเร็จปกติ และกรณีกู้ผลจากเซิร์ฟเวอร์หลังหมดเวลา */
+function finishFill_(orderId, siteCode, d) {
+  lockSubmit('btn-submit-fill', false);
+  busy(false);
+  CURRENT_FILL_KEY = newClientKey(); // รายการถัดไปใช้กุญแจใหม่
+  LAST_FILL_SITE[orderId] = siteCode;
+  var msg = (d.duplicate || d.recovered ? '✅ รายการนี้บันทึกไว้แล้ว (ไม่ได้บันทึกซ้ำ): ' : '✅ บันทึกแล้ว: ') + d.fillId;
+  if (d.flags && d.flags.length) msg += '\n🚩 ' + d.flags.join(', ');
+  if (d.totalSoFar != null) msg += '\nจ่ายสะสม ' + d.totalSoFar + ' / มีในถัง ' + d.available + ' ล.';
+  alert(msg);
+  renderDriverHome();
 }
 
 /* ---- รายการจ่ายของใบสั่ง ---- */
@@ -1056,7 +1141,8 @@ function renderOrderFills(orderId, backTo) {
           (f['รูปเลขไมล์'] ? ' <a href="' + esc(f['รูปเลขไมล์']) + '" target="_blank">📷</a>' : '') + '</td>' +
         '<td>' + flagsHtml(f['ธงเตือน']) + '</td>' +
         '<td>' + (!cancelled && f['สถานะนำเข้า DB'] === 'รอเสมียน 1 ตรวจ' && hasRole(ROLES.DRIVER)
-          ? '<button class="btn-danger btn-small" onclick="doCancelFill(\'' + esc(f['Fill ID']) + '\',\'' + orderId + '\',\'' + backTo + '\')">ยกเลิก</button>' : '') + '</td>' +
+          ? '<button class="btn-secondary btn-small" onclick="renderMyFillEdit(\'' + esc(f['Fill ID']) + '\',\'' + orderId + '\',\'' + backTo + '\')">✏️ แก้ไข</button> ' +
+            '<button class="btn-danger btn-small" onclick="doCancelFill(\'' + esc(f['Fill ID']) + '\',\'' + orderId + '\',\'' + backTo + '\')">ยกเลิก</button>' : '') + '</td>' +
         '</tr>';
     }).join('');
     var total = fills.filter(function (f) { return f['สถานะรายการ'] === 'ปกติ'; })
@@ -1068,6 +1154,82 @@ function renderOrderFills(orderId, backTo) {
       (rowsHtml || '<tr><td colspan="9" class="empty">ยังไม่มีรายการ</td></tr>') + '</table></div>' +
       '<button class="btn-secondary" onclick="' + (backTo === 'driver' ? 'renderDriverHome()' : 'renderClerk1()') + '">ย้อนกลับ</button></div>';
   }).catch(errBack);
+}
+/* ---- คนขับแก้รายการที่กรอกผิด (ก่อนปิดวันเท่านั้น — หลังจากนั้นต้องให้เสมียน 1 แก้) ----
+   ใช้ "แก้" แทน "ยกเลิกแล้วบันทึกใหม่" เพราะเลขมิเตอร์หัวจ่ายเป็นลูกโซ่ ยกเลิกกลางทางแล้วลูกโซ่จะขาด */
+function renderMyFillEdit(fillId, orderId, backTo) {
+  ensureMasters(['machines', 'sites', 'receivers']).then(function () {
+    busy(true, 'กำลังโหลดรายการ…');
+    return callServer('fillsOfOrder', CURRENT_USER.userId, orderId);
+  }).then(function (fills) {
+    busy(false);
+    var f = fills.filter(function (x) { return x['Fill ID'] === fillId; })[0];
+    if (!f) { showToast('ไม่พบรายการ'); renderOrderFills(orderId, backTo); return; }
+    var machineItems = MASTERS.machines.map(function (m) {
+      return { v: m.code, label: m.code + (m.name ? ' | ' + m.name : ''), sub: m.lastmile ? 'เลขไมล์ล่าสุดในระบบ ' + m.lastmile : '' };
+    });
+    var receiverItems = MASTERS.receivers.map(function (d) {
+      return { v: d.code + ' | ' + d.name, label: d.name, sub: 'รหัส ' + d.code };
+    });
+    var curReceiver = f['รหัสผู้รับ (driver_id)']
+      ? f['รหัสผู้รับ (driver_id)'] + ' | ' + f['ผู้รับน้ำมัน'] : (f['ผู้รับน้ำมัน'] || '');
+    $('main').innerHTML =
+      '<div class="card"><h3>✏️ แก้ไขรายการ — ' + esc(fillId) + '</h3>' +
+      '<div class="muted">แก้ได้จนถึงก่อนส่งรายงานปิดวัน ทุกการแก้ถูกบันทึกใน Log และแจ้งเสมียน 1 ตอนตรวจ</div>' +
+      '<label>เครื่องจักร</label>' +
+      comboField({ id: 'm-machine', items: machineItems, value: f['รหัสเครื่องจักร'],
+        title: 'เลือกเครื่องจักรจากทะเบียน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อเครื่องจักร…' }) +
+      '<label>หน้างาน</label>' +
+      comboField({ id: 'm-site', items: siteItems_(), value: f['รหัสหน้างาน (siteid)'],
+        title: 'เลือกหน้างาน', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสหน้างาน…' }) +
+      '<div class="grid2">' +
+      '<div><label>จำนวนลิตร</label><input id="m-qty" type="number" inputmode="decimal" value="' + esc(f['จำนวนลิตร']) + '"></div>' +
+      '<div><label>เลขไมล์ / ชั่วโมงเครื่องจักร</label><input id="m-mileage" type="number" inputmode="decimal" value="' + esc(f['เลขไมล์เครื่องจักร']) + '"></div>' +
+      '</div>' +
+      '<label>ผู้รับน้ำมัน / พนักงานขับ</label>' +
+      comboField({ id: 'm-receiver', items: receiverItems, value: curReceiver, allowFree: true, clearable: true,
+        title: 'เลือกผู้รับน้ำมัน (พิมพ์ชื่ออิสระได้ถ้าไม่มีในรายชื่อ)', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสผู้รับ…' }) +
+      '<label>เลขตู้จ่ายน้ำมันหลังเติม <span class="opt">(มิเตอร์บนรถ)</span></label>' +
+      '<input id="m-pumpafter" type="number" inputmode="decimal" value="' + esc(f['เลขมิเตอร์หัวจ่ายหลังเติม']) + '">' +
+      '<div class="hint">เลขก่อนเติมของรายการนี้: ' + esc(f['เลขมิเตอร์หัวจ่ายก่อนเติม'] || '—') + ' (แก้ไม่ได้ — ต่อจากรายการก่อนหน้า)</div>' +
+      '<label>เหตุผลที่แก้ <span class="opt">(บันทึกไว้ให้เสมียนดู)</span></label>' +
+      '<input id="m-reason" placeholder="เช่น กรอกลิตรผิด 100 -> 110">' +
+      '<button class="btn-primary" id="btn-save-myfill" onclick="doEditMyFill(\'' + esc(fillId) + '\',\'' + esc(orderId) + '\',\'' + backTo + '\')">💾 บันทึกการแก้ไข</button>' +
+      '<button class="btn-secondary" onclick="renderOrderFills(\'' + esc(orderId) + '\',\'' + backTo + '\')">ย้อนกลับ</button></div>';
+  }).catch(errBack);
+}
+function doEditMyFill(fillId, orderId, backTo) {
+  if (SUBMITTING) { showToast('กำลังบันทึกอยู่ รอสักครู่…'); return; }
+  var qty = num($('m-qty').value);
+  if (!qty || qty <= 0) { showToast('จำนวนลิตรต้องมากกว่า 0'); return; }
+  var machineCode = $('m-machine').value.trim();
+  if (!machineCode) { showToast('เลือกเครื่องจักรก่อน'); return; }
+  var siteCode = $('m-site').value.trim();
+  if (!siteCode) { showToast('เลือกหน้างานก่อน'); return; }
+  var r = parseReceiverValue_($('m-receiver').value);
+  if (!r.name) { showToast('กรอกชื่อผู้รับน้ำมันก่อน'); return; }
+  var reason = $('m-reason').value.trim();
+  var patch = {
+    'รหัสเครื่องจักร': machineCode,
+    'รหัสหน้างาน (siteid)': siteCode,
+    'จำนวนลิตร': String(qty),
+    'ผู้รับน้ำมัน': r.name,
+    'รหัสผู้รับ (driver_id)': r.code,
+    'เลขไมล์เครื่องจักร': $('m-mileage').value.trim(),
+    'เลขมิเตอร์หัวจ่ายหลังเติม': $('m-pumpafter').value.trim()
+  };
+  if (reason) patch['หมายเหตุ'] = 'แก้โดยคนขับ: ' + reason;
+  lockSubmit('btn-save-myfill', true, '⏳ กำลังบันทึก…');
+  busy(true, 'กำลังบันทึกการแก้ไข…');
+  callServer('editMyFill', CURRENT_USER.userId, fillId, patch).then(function (d) {
+    lockSubmit('btn-save-myfill', false, '💾 บันทึกการแก้ไข');
+    busy(false);
+    showToast(d.changed && d.changed.length ? 'แก้ไขแล้ว ' + d.changed.length + ' ช่อง' : 'ไม่มีอะไรเปลี่ยน');
+    renderOrderFills(orderId, backTo);
+  }).catch(function (err) {
+    lockSubmit('btn-save-myfill', false, '💾 บันทึกการแก้ไข');
+    errToast(err);
+  });
 }
 function doCancelFill(fillId, orderId, backTo) {
   var reason = prompt('เหตุผลที่ยกเลิกรายการนี้') || '';
