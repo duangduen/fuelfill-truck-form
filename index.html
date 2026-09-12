@@ -509,7 +509,8 @@ function init() {
       $('who').innerHTML = esc(me.name) + '<br>' + esc(me.roles.join(', '));
       buildNav();
       loadMasters();
-      navigate(defaultView());
+      var dl = deepLinkParams_();
+      openDeepLink_(dl.view, dl.order);
     });
   }).catch(function (err) {
     $('main').innerHTML = '<div class="card"><h3>เข้าระบบไม่ได้</h3><div class="muted">' + esc(err.message) + '</div>' +
@@ -532,6 +533,49 @@ function copyRegId() {
 }
 
 function hasRole(r) { return CURRENT_USER && (CURRENT_USER.roles.indexOf(r) !== -1 || CURRENT_USER.roles.indexOf(ROLES.ADMIN) !== -1); }
+/* ---- Deep link: เปิดแอปจาก Rich Menu / ปุ่มในข้อความแจ้งเตือน ให้ไปหน้าที่ต้องทำทันที ----
+   https://liff.line.me/<LIFF_ID>?view=fill|fills|load|eod|driver|clerk1|clerk2|station|ap|dashboard[&order=FO69xxxx]
+   LIFF ส่ง query string ต่อมาถึงหน้าเว็บ (และกู้คืนหลัง login ผ่าน liff.state) จึงอ่านหลัง liff.init เสร็จ */
+function deepLinkParams_() {
+  var q = new URLSearchParams(location.search);
+  var view = q.get('view') || '';
+  // บาง client ส่งมาในรูป liff.state=%3Fview%3D... (ยังไม่ถูก SDK แกะ) — แกะเองเผื่อไว้
+  if (!view && q.get('liff.state')) {
+    try { var q2 = new URLSearchParams(String(q.get('liff.state')).replace(/^\?/, '')); view = q2.get('view') || ''; if (!q.get('order')) q = q2; } catch (e) {}
+  }
+  return { view: view.trim(), order: (q.get('order') || '').trim() };
+}
+function setNavActive_(view) {
+  document.querySelectorAll('nav button').forEach(function (b) { b.classList.remove('active'); });
+  var btn = $('nav-' + view); if (btn) btn.classList.add('active');
+}
+var DRIVER_DEEP_VIEWS = {
+  fill:  { want: ['รับน้ำมันแล้ว กำลังจ่ายหน้างาน'], open: function (id) { renderFillForm(id); } },
+  fills: { want: ['รับน้ำมันแล้ว กำลังจ่ายหน้างาน', 'ส่งรายงานแล้ว รอเสมียนตรวจ'], open: function (id) { renderOrderFills(id, 'driver'); } },
+  load:  { want: ['ออกใบสั่งแล้ว รอรับน้ำมัน', 'รับน้ำมันแล้ว กำลังจ่ายหน้างาน'], open: function (id) { renderLoadForm(id); } },
+  eod:   { want: ['รับน้ำมันแล้ว กำลังจ่ายหน้างาน'], open: function (id) { renderEodForm(id); } }
+};
+function openDeepLink_(view, orderId) {
+  if (!view) { navigate(defaultView()); return; }
+  var roleViews = ['driver', 'clerk1', 'clerk2', 'station', 'ap', 'dashboard'];
+  if (roleViews.indexOf(view) !== -1) {
+    // ไปหน้าบทบาทได้เฉพาะที่มีสิทธิ์ (มีปุ่มใน nav) ไม่งั้นกลับหน้าประจำ
+    navigate(view === 'dashboard' || $('nav-' + view) ? view : defaultView());
+    return;
+  }
+  var spec = DRIVER_DEEP_VIEWS[view];
+  if (!spec || !hasRole(ROLES.DRIVER)) { navigate(defaultView()); return; }
+  setNavActive_('driver');
+  busy(true, 'กำลังเปิดใบสั่งของคุณ…');
+  callServer('myOrders', CURRENT_USER.userId).then(function (orders) {
+    busy(false);
+    var o = orderId ? orders.filter(function (x) { return x['Order ID'] === orderId; })[0] : null;
+    if (o && spec.want.indexOf(o['สถานะ']) === -1) o = null; // ใบที่ระบุมาอยู่ในสถานะที่ทำหน้านี้ไม่ได้แล้ว
+    if (!o) o = orders.filter(function (x) { return spec.want.indexOf(x['สถานะ']) !== -1; })[0];
+    if (!o) { renderDriverHome(); showToast('ยังไม่มีใบสั่งที่ทำขั้นตอนนี้ได้ตอนนี้'); return; }
+    spec.open(o['Order ID']);
+  }).catch(function () { navigate('driver'); });
+}
 function defaultView() {
   if (hasRole(ROLES.DRIVER)) return 'driver';
   if (hasRole(ROLES.CLERK1)) return 'clerk1';
