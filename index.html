@@ -116,6 +116,7 @@
     background: rgba(28,43,36,.95); color: #fff; padding: 10px 18px; border-radius: 10px;
     font-size: 14px; z-index: 99; display: none; max-width: 90%; text-align: center;
   }
+  .req { color: var(--c-danger); font-weight: 600; font-size: 12px; }
   .spinner {
     display: none; position: fixed; inset: 0; background: rgba(255,255,255,.75);
     z-index: 98; align-items: center; justify-content: center; flex-direction: column; gap: 12px;
@@ -176,6 +177,7 @@ var DEV_USER_ID = new URLSearchParams(location.search).get('dev');
 
 // ค่าเริ่มต้นของฟอร์ม (แก้ตรงนี้ที่เดียวถ้าธุรกิจเปลี่ยน)
 var DEFAULT_FUEL_CODE = '12';         // ดีเซล B-20 — เกรดที่ใช้จริงเกือบทั้งหมด
+var REQUIRE_FILL_PHOTO = true;        // บังคับรูปเครื่องจักร (ต้องตรงกับ CONFIG.REQUIRE_FILL_PHOTO ใน Config.gs)
 var DEFAULT_PO_LOCATION_CODE = '10401'; // สถานที่รับน้ำมันที่ใช้บ่อยที่สุด (fuel_po_location.code)
 
 var CURRENT_USER = null; // {userId, name, roles:[...], defaultTank}
@@ -264,7 +266,7 @@ var GET_ACTION_ARGS = {
 };
 // submitFill มีรูปแนบ — ลอง JSONP ก่อนถ้าสั้นพอ ไม่งั้น hidden-iframe form (pattern markMoved เดิม)
 var POST_ACTION_ARGS = {
-  submitFill: ['userId', 'payload', 'photo'],
+  submitFill: ['userId', 'payload', 'photo', 'photo2'], // photo = รูปเครื่องจักร (บังคับ), photo2 = รูปเลขไมล์
   addReceipt: ['userId', 'orderId', 'payload', 'photo'] // รูปใบเสร็จปั๊ม 1 ใบต่อครั้ง
 };
 GET_ACTION_ARGS.recordLoad = ['userId', 'orderId', 'payload'];
@@ -468,6 +470,14 @@ function statusChip(status) {
   if (/รอ|กำลัง/.test(status)) cls = 'warn';
   if (/ยกเลิก|ไม่สำเร็จ/.test(status)) cls = 'danger';
   return '<span class="status-chip ' + cls + '">' + esc(status) + '</span>';
+}
+/** ลิงก์รูปของรายการจ่าย: 📷 = รูปเครื่องจักร (เห็นเลขข้างเครื่อง), 🔢 = รูปเลขไมล์ | ⚠️ ถ้าไม่มีรูปเครื่องจักร */
+function photoLinks_(f) {
+  var h = '';
+  if (f['รูปเครื่องจักร']) h += ' <a href="' + esc(f['รูปเครื่องจักร']) + '" target="_blank" title="รูปเครื่องจักร">📷</a>';
+  else h += ' <span class="neg" title="ไม่มีรูปเครื่องจักร">⚠️</span>';
+  if (f['รูปเลขไมล์']) h += ' <a href="' + esc(f['รูปเลขไมล์']) + '" target="_blank" title="รูปเลขไมล์">🔢</a>';
+  return h;
 }
 function flagsHtml(flagsStr) {
   if (!flagsStr) return '';
@@ -972,9 +982,12 @@ function renderFillForm_(orderId) {
     '<div class="hint" id="receiver-hint">เลือกจากรายชื่อ = รหัสเข้าฐานข้อมูลครบ | พิมพ์ชื่ออิสระได้ถ้าไม่พบ</div></div>' +
     '</div>' +
     '<label>เลขไมล์ / ชั่วโมงเครื่องจักร</label><input id="f-mileage" type="number" inputmode="decimal">' +
-    '<label>รูปถ่ายเลขไมล์</label>' +
-    '<input type="file" accept="image/*" capture="environment" id="f-photo" onchange="previewPhoto()">' +
+    '<label>📷 รูปเครื่องจักร <span class="req">*บังคับ</span> <span class="opt">— ถ่ายสดให้เห็น "เลขข้างเครื่อง" ชัด ๆ (หลักฐานว่าเติมคันไหน)</span></label>' +
+    '<input type="file" accept="image/*" capture="environment" id="f-photo" onchange="previewPhoto(\'f-photo\',\'photo-preview\')">' +
     '<img id="photo-preview" class="photo-preview" style="display:none">' +
+    '<label>รูปเลขไมล์ <span class="opt">(ถ้าถ่ายได้)</span></label>' +
+    '<input type="file" accept="image/*" capture="environment" id="f-photo2" onchange="previewPhoto(\'f-photo2\',\'photo-preview2\')">' +
+    '<img id="photo-preview2" class="photo-preview" style="display:none">' +
     '<label>เลขตู้จ่ายน้ำมันหลังเติม <span class="opt">(มิเตอร์บนรถ)</span></label><input id="f-pumpafter" type="number" inputmode="decimal" oninput="meterHint()">' +
     '<div class="hint" id="meter-hint">เลขก่อนเติมระบบต่อให้อัตโนมัติจากรายการก่อนหน้า</div>' +
     '<label>วันเวลาเติม <span class="opt">(เว้นว่าง = ตอนนี้)</span></label><input id="f-datetime" placeholder="dd/mm/yyyy hh:mm">' +
@@ -1062,10 +1075,10 @@ function receiverHint() {
   if (r.code) { el.textContent = '✓ ' + r.code + ' ' + r.name; el.className = 'hint'; }
   else { el.textContent = 'ไม่พบในรายชื่อ — บันทึกเป็นชื่ออิสระ (ไม่มีรหัสเข้าฐานข้อมูล)'; el.className = 'hint'; }
 }
-function previewPhoto() {
-  var f = $('f-photo').files[0];
-  if (!f) { $('photo-preview').style.display = 'none'; return; }
-  var img = $('photo-preview');
+function previewPhoto(inputId, imgId) {
+  var f = $(inputId || 'f-photo').files[0];
+  var img = $(imgId || 'photo-preview');
+  if (!f) { img.style.display = 'none'; return; }
   img.src = URL.createObjectURL(f);
   img.style.display = 'block';
 }
@@ -1108,14 +1121,20 @@ function doSubmitFill(orderId) {
     fillDateTime: $('f-datetime').value.trim(), gps: CURRENT_GPS
   };
   if (SUBMITTING) { showToast('กำลังบันทึกอยู่ รอสักครู่…'); return; }
+  if (REQUIRE_FILL_PHOTO && !$('f-photo').files[0]) {
+    showToast('📷 ต้องถ่ายรูปเครื่องจักรที่เห็นเลขข้างเครื่องก่อนบันทึก');
+    try { $('f-photo').scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+    return;
+  }
   payload.clientKey = CURRENT_FILL_KEY;
 
   lockSubmit('btn-submit-fill', true, '⏳ กำลังบันทึก…');
   busy(true, 'กำลังย่อรูป…');
   var hasPhoto = !!$('f-photo').files[0];
-  compressPhoto($('f-photo').files[0]).then(function (photo) {
+  Promise.all([compressPhoto($('f-photo').files[0]), compressPhoto($('f-photo2').files[0])]).then(function (ph) {
+    if (hasPhoto && !ph[0]) throw new Error('อ่านรูปเครื่องจักรไม่ได้ ลองถ่ายใหม่');
     busy(true, hasPhoto ? 'กำลังส่งข้อมูล + รูปขึ้นเซิร์ฟเวอร์…\nเน็ตช้าอาจใช้เวลาถึง 1 นาที\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ' : 'กำลังส่งข้อมูล…');
-    return callServer('submitFill', CURRENT_USER.userId, payload, photo);
+    return callServer('submitFill', CURRENT_USER.userId, payload, ph[0], ph[1]);
   }).then(function (d) {
     finishFill_(orderId, site.code, d);
   }).catch(function (err) {
@@ -1165,7 +1184,7 @@ function renderOrderFills(orderId, backTo) {
         '<td style="text-align:right"><b>' + esc(f['จำนวนลิตร']) + '</b></td>' +
         '<td>' + esc(f['ผู้รับน้ำมัน']) + '</td>' +
         '<td>' + esc(f['เลขไมล์เครื่องจักร']) +
-          (f['รูปเลขไมล์'] ? ' <a href="' + esc(f['รูปเลขไมล์']) + '" target="_blank">📷</a>' : '') + '</td>' +
+          photoLinks_(f) + '</td>' +
         '<td>' + flagsHtml(f['ธงเตือน']) + '</td>' +
         '<td>' + (!cancelled && f['สถานะนำเข้า DB'] === 'รอเสมียน 1 ตรวจ' && hasRole(ROLES.DRIVER)
           ? '<button class="btn-secondary btn-small" onclick="renderMyFillEdit(\'' + esc(f['Fill ID']) + '\',\'' + orderId + '\',\'' + backTo + '\')">✏️ แก้ไข</button> ' +
@@ -1462,7 +1481,7 @@ function renderReviewDetail(orderId) {
         '<td style="text-align:right"><b>' + esc(f['จำนวนลิตร']) + '</b></td>' +
         '<td>' + esc(f['ผู้รับน้ำมัน']) + '</td>' +
         '<td>' + esc(f['เลขไมล์เครื่องจักร']) +
-          (f['รูปเลขไมล์'] ? ' <a href="' + esc(f['รูปเลขไมล์']) + '" target="_blank">📷</a>' : '') + '</td>' +
+          photoLinks_(f) + '</td>' +
         '<td>' + esc(f['เลขมิเตอร์หัวจ่ายก่อนเติม']) + '→' + esc(f['เลขมิเตอร์หัวจ่ายหลังเติม']) + '</td>' +
         '<td>' + flagsHtml(f['ธงเตือน']) + '</td>' +
         '<td>' + (!cancelled ? '<button class="btn-secondary btn-small" onclick="renderEditFill(\'' + esc(f['Fill ID']) + '\',\'' + esc(orderId) + '\')">แก้ไข</button>' : '') + '</td></tr>';
