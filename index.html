@@ -812,7 +812,7 @@ function buildNav() {
   if (hasRole(ROLES.CLERK1)) items.push({ id: 'clerk1', ico: '🧾', label: 'เสมียน 1' });
   if (hasRole(ROLES.CLERK2)) items.push({ id: 'clerk2', ico: '🔍', label: 'เสมียน 2' });
   if (hasRole(ROLES.STATION_CLERK1)) items.push({ id: 'station', ico: '⛽', label: 'ปั๊ม' });
-  if (hasRole(ROLES.STATION_CLERK2)) items.push({ id: 'ap', ico: '🏢', label: 'fuel_ap' });
+  if (hasRole(ROLES.STATION_CLERK2)) items.push({ id: 'ap', ico: '🏢', label: 'บัญชีน้ำมัน' }); // เสมียนปั๊ม 2 (สำนักงานใหญ่) — ชื่อเมนูไม่ใช้ศัพท์ตาราง fuel_ap (ผู้ใช้ขอ 14 ก.ย. 2569)
   items.push({ id: 'dashboard', ico: '📊', label: 'ภาพรวม' });
   var nav = $('nav');
   nav.innerHTML = items.map(function (it) {
@@ -2023,12 +2023,12 @@ function renderStation(tab) {
       busy(false);
       var html = stationTabs(tab);
       if (!rows.length) html += '<div class="empty">ยังไม่มีประวัติ</div>';
-      else html += '<div class="card"><div class="tablewrap"><table><tr><th>ใบเสร็จ</th><th>วันที่</th><th>รถ</th><th>ลิตร</th><th>ราคา</th><th>เงิน</th><th>สถานะ</th><th>fuel_ap</th></tr>' +
+      else html += '<div class="card"><div class="tablewrap"><table><tr><th>ใบเสร็จ</th><th>วันที่</th><th>รถ</th><th>ลิตร</th><th>ราคา</th><th>เงิน</th><th>สถานะ</th><th>ลงบัญชี</th></tr>' +
         rows.map(function (r) {
           return '<tr><td>' + esc(r['Receipt ID']) + (r['รูปใบเสร็จ'] ? ' <a href="' + esc(r['รูปใบเสร็จ']) + '" target="_blank">📷</a>' : '') +
             '<br><span class="muted">' + esc(r['เลขที่ใบเสร็จ'] || '-') + '</span></td><td>' + esc(r['วันเวลาบันทึก']) + '</td><td>' + esc(r['รถน้ำมัน']) + '</td>' +
             '<td style="text-align:right">' + esc(r['จำนวนลิตร']) + '</td><td style="text-align:right">' + esc(r['ราคาต่อลิตร']) + '</td>' +
-            '<td style="text-align:right">' + money(r['จำนวนเงิน']) + '</td><td>' + esc(r['สถานะปั๊มตรวจ']) + '</td><td>' + esc(r['สถานะ fuel_ap'] || '') + '</td></tr>';
+            '<td style="text-align:right">' + money(r['จำนวนเงิน']) + '</td><td>' + esc(r['สถานะปั๊มตรวจ']) + '</td><td>' + esc(apStatusLabel(r['สถานะ fuel_ap'])) + '</td></tr>';
         }).join('') + '</table></div></div>';
       $('main').innerHTML = html;
     }).catch(errBack);
@@ -2080,7 +2080,7 @@ function stationSummaryHtml(sm, withSend) {
       ' <button class="btn-secondary btn-small" onclick="window.STATION_DATE=$(\'st-date\').value.trim();renderStation(\'daily\')">ดู</button></div>' : '') +
     '<div class="calcbox">🚛 รถน้ำมัน <span class="big">' + sm.truckCount + '</span> คัน | 🧾 ' + sm.receiptCount + ' ใบ' +
     '<br>🛢 รวม <span class="big">' + (sm.liters || 0).toLocaleString() + '</span> ลิตร | 💰 <span class="big">' + money(sm.amount) + '</span> บาท' +
-    '<br><span class="muted">ตรวจแล้ว ' + sm.verified + ' | รอตรวจ ' + sm.pending + ' | ไม่ตรง ' + sm.mismatch + ' | คีย์ fuel_ap แล้ว ' + sm.apDone + '</span></div>';
+    '<br><span class="muted">ตรวจแล้ว ' + sm.verified + ' | รอตรวจ ' + sm.pending + ' | ไม่ตรง ' + sm.mismatch + ' | ลงบัญชีแล้ว ' + sm.apDone + '</span></div>';
   var fuels = Object.keys(sm.byFuel || {});
   if (fuels.length) {
     html += '<div class="tablewrap" style="margin-top:8px"><table><tr><th>ชนิดน้ำมัน</th><th>ใบ</th><th>ลิตร</th><th>บาท</th></tr>' +
@@ -2110,10 +2110,13 @@ function doSendStationDaily() {
     .catch(errToast);
 }
 
-/* ================================ เสมียนปั๊ม 2 (สำนักงานใหญ่ — fuel_ap) ================================ */
+/* ================================ เสมียนปั๊ม 2 (สำนักงานใหญ่ — "บัญชีน้ำมัน") ================================
+   หน้าจอใช้คำว่า "ลงบัญชี" แทน fuel_ap ทุกจุด (ชื่อตารางในระบบบริษัท ผู้ใช้ไม่รู้จัก) — ค่าที่เก็บในชีต/สคริปต์นำเข้ายังเป็นค่าเดิม */
+var AP_STATUS_LABEL = { 'รอบันทึก fuel_ap': 'รอลงบัญชี', 'บันทึก fuel_ap แล้ว': 'ลงบัญชีแล้ว', 'นำเข้า fuel_ap ไม่สำเร็จ': 'ลงบัญชีไม่สำเร็จ' };
+function apStatusLabel(v) { return AP_STATUS_LABEL[v] || v || ''; }
 function apTabs(active) {
   return '<div class="tabbar">' +
-    ['pending|🏢 รอคีย์ fuel_ap', 'monthly|📅 สรุปรายเดือน'].map(function (t) {
+    ['pending|🏢 รอลงบัญชี', 'monthly|📅 สรุปรายเดือน'].map(function (t) {
       var p = t.split('|');
       return '<button class="' + (active === p[0] ? 'active' : '') + '" onclick="renderAp(\'' + p[0] + '\')">' + p[1] + '</button>';
     }).join('') + '</div>';
@@ -2126,7 +2129,7 @@ function renderAp(tab) {
     AP.then(function (d) { return d.pending; }).then(function (rows) {
       busy(false);
       var html = apTabs(tab);
-      if (!rows.length) { $('main').innerHTML = html + '<div class="empty">ไม่มีใบเสร็จรอคีย์ fuel_ap 🎉</div>'; return; }
+      if (!rows.length) { $('main').innerHTML = html + '<div class="empty">ไม่มีใบเสร็จรอลงบัญชี 🎉</div>'; return; }
       // จัดกลุ่มตามวันที่ + ปั๊ม ให้คีย์เป็นชุดตามที่สำนักงานใหญ่ทำจริง
       var groups = {};
       rows.forEach(function (r) {
@@ -2134,8 +2137,8 @@ function renderAp(tab) {
         (groups[k] = groups[k] || []).push(r);
       });
       var failed = rows.filter(function (r) { return r['สถานะ fuel_ap'] === 'นำเข้า fuel_ap ไม่สำเร็จ'; });
-      html += '<div class="card"><div class="muted">ระบบนำเข้า materialdb (fuel_po/fuel_ap) ให้อัตโนมัติทุกคืน — รายการด้านล่างคือใบที่ยังไม่ได้นำเข้า' +
-        (failed.length ? '<br><b style="color:var(--c-danger)">⚠️ นำเข้าไม่สำเร็จ ' + failed.length + ' ใบ</b> ดูสาเหตุในแถวสีแดง แจ้งเสมียนปั๊ม 1 แก้ราคา/ยอดเงิน แล้วระบบจะลองใหม่คืนถัดไป' : '') + '</div>' +
+      html += '<div class="card"><div class="muted">ระบบลงบัญชีน้ำมันเข้าระบบบริษัทให้อัตโนมัติทุกคืน — รายการด้านล่างคือใบที่ยังไม่ได้ลงบัญชี' +
+        (failed.length ? '<br><b style="color:var(--c-danger)">⚠️ ลงบัญชีไม่สำเร็จ ' + failed.length + ' ใบ</b> ดูสาเหตุในแถวสีแดง แจ้งเสมียนปั๊ม 1 แก้ราคา/ยอดเงิน แล้วระบบจะลองใหม่คืนถัดไป' : '') + '</div>' +
         '<div class="tablewrap" style="margin-top:8px"><table><tr><th><input type="checkbox" onchange="document.querySelectorAll(\'.ap-cb\').forEach(function(c){c.checked=this.checked},this)"></th>' +
         '<th>วันที่ / ปั๊ม</th><th>ใบเสร็จ</th><th>รถ</th><th>น้ำมัน</th><th>ลิตร</th><th>ราคา</th><th>บาท</th></tr>';
       var total = 0, totalL = 0;
@@ -2145,7 +2148,7 @@ function renderAp(tab) {
           total += num(r['จำนวนเงิน']) || 0; totalL += num(r['จำนวนลิตร']) || 0;
           var isFail = r['สถานะ fuel_ap'] === 'นำเข้า fuel_ap ไม่สำเร็จ';
           html += '<tr' + (isFail ? ' style="background:#fdecea"' : '') + '><td><input type="checkbox" class="ap-cb" value="' + esc(r['Receipt ID']) + '"></td>' +
-            '<td>' + esc(r['วันเวลาบันทึก']) + (isFail ? '<br><span style="color:var(--c-danger);font-size:12px">❌ ' + esc(r['ข้อความ error fuel_ap'] || 'นำเข้าไม่สำเร็จ') + '</span>' : '') + '</td>' +
+            '<td>' + esc(r['วันเวลาบันทึก']) + (isFail ? '<br><span style="color:var(--c-danger);font-size:12px">❌ ' + esc(r['ข้อความ error fuel_ap'] || 'ลงบัญชีไม่สำเร็จ') + '</span>' : '') + '</td>' +
             '<td>' + esc(r['Receipt ID']) + (r['รูปใบเสร็จ'] ? ' <a href="' + esc(r['รูปใบเสร็จ']) + '" target="_blank">📷</a>' : '') + '<br><span class="muted">' + esc(r['เลขที่ใบเสร็จ'] || '-') + '</span></td>' +
             '<td>' + esc(r['รถน้ำมัน']) + '</td><td>' + esc(r['ชนิดน้ำมัน']) + '</td>' +
             '<td style="text-align:right">' + esc(r['จำนวนลิตร']) + '</td><td style="text-align:right">' + esc(r['ราคาต่อลิตร']) + '</td>' +
@@ -2153,9 +2156,9 @@ function renderAp(tab) {
         });
       });
       html += '<tr><td colspan="5" style="text-align:right"><b>รวมค้าง</b></td><td style="text-align:right"><b>' + totalL.toLocaleString() + '</b></td><td></td><td style="text-align:right"><b>' + money(total) + '</b></td></tr></table></div>' +
-        '<details style="margin-top:10px"><summary class="muted">คีย์มือแทนระบบ (กรณีพิเศษ)</summary>' +
-        '<label>เลขที่เอกสาร fuel_ap <span class="opt">(ไม่บังคับ — ใส่ถ้าคีย์เป็นเอกสารเดียวกัน)</span></label><input id="ap-docno" placeholder="เช่น TA1006900123">' +
-        '<button class="btn-secondary" onclick="doMarkAp()">✅ ยืนยันว่าคีย์ fuel_ap แล้ว (ใบที่เลือก)</button></details></div>';
+        '<details style="margin-top:10px"><summary class="muted">ลงบัญชีมือแทนระบบ (กรณีพิเศษ)</summary>' +
+        '<label>เลขที่เอกสารในระบบบริษัท <span class="opt">(ไม่บังคับ — ใส่ถ้าลงเป็นเอกสารเดียวกัน)</span></label><input id="ap-docno" placeholder="เช่น TA1006900123">' +
+        '<button class="btn-secondary" onclick="doMarkAp()">✅ ยืนยันว่าลงบัญชีแล้ว (ใบที่เลือก)</button></details></div>';
       $('main').innerHTML = html;
     }).catch(errBack);
   } else {
@@ -2175,7 +2178,7 @@ function renderAp(tab) {
 function doMarkAp() {
   var ids = Array.prototype.slice.call(document.querySelectorAll('.ap-cb:checked')).map(function (c) { return c.value; });
   if (!ids.length) { showToast('เลือกใบเสร็จก่อน'); return; }
-  if (!confirm('ยืนยันว่าคีย์ ' + ids.length + ' ใบเข้า fuel_ap แล้ว?')) return;
+  if (!confirm('ยืนยันว่าลงบัญชี ' + ids.length + ' ใบในระบบบริษัทแล้ว?')) return;
   busy(true);
   callServer('markApRecorded', CURRENT_USER.userId, ids, $('ap-docno').value.trim())
     .then(function (d) { busy(false); showToast('บันทึกแล้ว ' + d.recorded.length + ' ใบ'); renderAp('pending'); })
