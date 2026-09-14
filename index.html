@@ -177,6 +177,8 @@ var DEV_USER_ID = new URLSearchParams(location.search).get('dev');
 
 // ค่าเริ่มต้นของฟอร์ม (แก้ตรงนี้ที่เดียวถ้าธุรกิจเปลี่ยน)
 var DEFAULT_FUEL_CODE = '12';         // ดีเซล B-20 — เกรดที่ใช้จริงเกือบทั้งหมด
+var OTHER_MACHINE_CODE = 'อื่นๆ';   // ต้องตรง CONFIG.OTHER_MACHINE_CODE — เครื่องจักรไม่มีในทะเบียน คนขับพิมพ์ชื่อเอง
+var OTHER_MACHINE_ITEM = { v: 'อื่นๆ', label: '✍️ อื่นๆ — เครื่องจักรไม่มีในรายการ', sub: 'พิมพ์ชื่อ/ทะเบียนเอง แล้วเสมียน 1 จะเพิ่มในทะเบียนให้' };
 var REQUIRE_FILL_PHOTO = true;        // บังคับรูปเครื่องจักร (ต้องตรงกับ CONFIG.REQUIRE_FILL_PHOTO ใน Config.gs)
 var DEFAULT_PO_LOCATION_CODE = '10401'; // สถานที่รับน้ำมันที่ใช้บ่อยที่สุด (fuel_po_location.code)
 
@@ -379,6 +381,7 @@ function comboField(cfg) {
 function comboLabel_(cfg, v) {
   if (!v) return '';
   var hit = cfg.items.filter(function (it) { return String(it.v) === String(v); })[0];
+  if (!hit && cfg.otherItem && String(cfg.otherItem.v) === String(v)) hit = cfg.otherItem;
   return hit ? hit.label : v;
 }
 function comboSetValue(id, v) {
@@ -405,16 +408,74 @@ function comboClose() {
   $('combo-modal').style.display = 'none';
   COMBO_ACTIVE = null;
 }
+/* ---- ค้นหาแบบทนต่อการพิมพ์ไม่ตรง (ผู้ใช้ขอ 14 ก.ย. 2569) ----
+   1) ตัดช่องว่าง/ขีด/จุด ออกก่อนเทียบ: "x75" เจอ "X - 75", "0908" เจอ "83-0908", "x 85" เจอ "X-85"
+   2) พิมพ์แค่ตัวเลข: "75" เจอทุกรหัสที่มี 75
+   3) พิมพ์ผิด/ตกหล่น 1 ตัวอักษร (คำยาว >= 4): "แบคโฮ" เจอ "แบ็คโฮ", "x-57" ก็ยังเจอ "X-75" ไว้ท้ายรายการ
+   4) จัดอันดับ: ขึ้นต้นด้วยคำที่พิมพ์ก่อน > มีคำอยู่ในรหัส > มีในชื่อ > เดาจากพิมพ์ผิด */
+function comboNorm_(s) { return String(s == null ? '' : s).toLowerCase().replace(/[\s\-_.,/()|:]+/g, ''); }
+function editDist1_(a, b) { // true ถ้าต่างกันไม่เกิน 1 ตัว (แทน/เพิ่ม/ลบ)
+  if (a === b) return true;
+  var la = a.length, lb = b.length;
+  if (Math.abs(la - lb) > 1) return false;
+  var i = 0, j = 0, edits = 0;
+  while (i < la && j < lb) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (la > lb) i++; else if (lb > la) j++; else { i++; j++; }
+  }
+  return edits + (la - i) + (lb - j) <= 1;
+}
+function comboScore_(it, terms) {
+  // คืน 0 = ไม่ตรง | ยิ่งมากยิ่งอยู่บน
+  var code = comboNorm_(it.v), label = comboNorm_(it.label), sub = comboNorm_(it.sub);
+  var hayNorm = code + ' ' + label + ' ' + sub;
+  var hayRaw = (String(it.v) + ' ' + String(it.label) + ' ' + String(it.sub || '')).toLowerCase();
+  var total = 0;
+  for (var k = 0; k < terms.length; k++) {
+    var t = terms[k], tn = comboNorm_(t), sc = 0;
+    if (!tn) continue;
+    if (code === tn) sc = 100;
+    else if (code.indexOf(tn) === 0) sc = 80;
+    else if (code.indexOf(tn) !== -1) sc = 60;
+    else if (label.indexOf(tn) !== -1 || hayRaw.indexOf(t) !== -1) sc = 40;
+    else if (sub.indexOf(tn) !== -1) sc = 30;
+    else if (tn.length >= 4) {
+      // พิมพ์ผิด 1 ตัว: เทียบกับรหัสทั้งก้อน หรือคำแต่ละคำในชื่อ
+      var words = [code].concat(String(it.label).toLowerCase().split(/[\s|/]+/).map(comboNorm_));
+      for (var w = 0; w < words.length; w++) {
+        if (words[w] && editDist1_(tn, words[w])) { sc = 10; break; }
+        // คำยาวกว่า: ดูว่า tn เป็นส่วนหนึ่งของคำเมื่อยอมผิด 1 ตัว (เลื่อนหน้าต่าง)
+        if (!sc && words[w].length > tn.length) {
+          for (var o = 0; o + tn.length <= words[w].length; o++) {
+            if (editDist1_(tn, words[w].substr(o, tn.length))) { sc = 8; break; }
+          }
+          if (sc) break;
+        }
+      }
+    }
+    if (!sc) return 0; // ทุกคำที่พิมพ์ต้องเจอ
+    total += sc;
+  }
+  return total;
+}
 function comboRenderList() {
   var cfg = COMBOS[COMBO_ACTIVE]; if (!cfg) return;
   var raw = $('combo-search').value.trim();
   var terms = raw ? raw.toLowerCase().split(/\s+/) : [];
   var cur = ($(cfg.id) || {}).value || '';
-  var hits = cfg.items.filter(function (it) {
-    if (!terms.length) return true;
-    var hay = (String(it.v) + ' ' + String(it.label) + ' ' + String(it.sub || '')).toLowerCase();
-    return terms.every(function (t) { return hay.indexOf(t) !== -1; }); // ค้นได้ทั้งรหัสและชื่อ หลายคำ
-  });
+  var hits;
+  if (!terms.length) {
+    hits = cfg.items.slice();
+  } else {
+    hits = [];
+    cfg.items.forEach(function (it, idx) {
+      var sc = comboScore_(it, terms);
+      if (sc > 0) hits.push({ it: it, sc: sc, idx: idx });
+    });
+    hits.sort(function (a, b) { return b.sc - a.sc || a.idx - b.idx; });
+    hits = hits.map(function (h) { return h.it; });
+  }
   var shown = hits.slice(0, 200); // กันค้างตอนรายการยาว (เครื่องจักร 400+) — พิมพ์เพิ่มเพื่อแคบลง
   var html = '';
   if (cfg.clearable) html += '<div class="combo-item" data-v="">— ไม่ระบุ —</div>';
@@ -425,8 +486,13 @@ function comboRenderList() {
     return '<div class="combo-item' + (String(it.v) === String(cur) ? ' sel' : '') + '" data-v="' + esc(it.v) + '">' +
       esc(it.label) + (it.sub ? '<span class="sub">' + esc(it.sub) + '</span>' : '') + '</div>';
   }).join('');
-  if (!shown.length && !cfg.allowFree) {
+  if (!shown.length && !cfg.allowFree && !cfg.otherItem) {
     html += '<div class="combo-empty">ไม่พบรายการที่ตรงกับ “' + esc(raw) + '”</div>';
+  }
+  if (cfg.otherItem) {
+    // ตัวเลือก "อื่นๆ" โชว์เสมอ (ท้ายรายการ) — เผื่อเครื่องจักรไม่มีในทะเบียน
+    html += '<div class="combo-item free' + (String(cfg.otherItem.v) === String(cur) ? ' sel' : '') + '" data-v="' + esc(cfg.otherItem.v) + '">' +
+      esc(cfg.otherItem.label) + (cfg.otherItem.sub ? '<span class="sub">' + esc(cfg.otherItem.sub) + '</span>' : '') + '</div>';
   }
   if (hits.length > shown.length) {
     html += '<div class="combo-empty">แสดง ' + shown.length + ' จาก ' + hits.length + ' รายการ — พิมพ์เพิ่มเพื่อค้นหาให้แคบลง</div>';
@@ -1040,12 +1106,14 @@ function renderFillForm_(orderId) {
   });
   $('main').innerHTML =
     '<div class="card"><h3>⛽ เติมให้เครื่องจักร — ' + esc(orderId) + '</h3>' +
-    '<label>เครื่องจักร <span class="opt">(แตะแล้วพิมพ์ค้นหารหัส/ชื่อ — เลือกจากทะเบียนเท่านั้น)</span></label>' +
+    '<label>เครื่องจักร <span class="opt">(แตะแล้วพิมพ์รหัส/ชื่อ/แค่ตัวเลขก็ได้ — ไม่มีในรายการเลือก "อื่นๆ")</span></label>' +
     comboField({
-      id: 'f-machine', items: machineItems, title: 'เลือกเครื่องจักรจากทะเบียน',
-      placeholder: 'แตะเพื่อค้นหาเครื่องจักร', searchPlaceholder: 'เช่น X-75 หรือชื่อเครื่องจักร…',
+      id: 'f-machine', items: machineItems, title: 'เลือกเครื่องจักรจากทะเบียน', otherItem: OTHER_MACHINE_ITEM,
+      placeholder: 'แตะเพื่อค้นหาเครื่องจักร', searchPlaceholder: 'เช่น X-75, x75, 75 หรือชื่อเครื่องจักร…',
       onChange: machineHint
     }) +
+    '<div id="machine-other-wrap" style="display:none"><label>ชื่อ / ทะเบียนเครื่องจักร <span class="req">*พิมพ์เอง</span></label>' +
+    '<input id="f-machine-other" placeholder="เช่น รถบดเช่า ทะเบียน 12-3456 หรือ แบ็คโฮ PC200 ของผู้รับเหมา"></div>' +
     '<div class="hint" id="machine-hint"></div>' +
     '<label>หน้างาน</label>' +
     comboField({
@@ -1116,7 +1184,15 @@ function machineHint() {
   var code = $('f-machine').value.trim();
   var m = MASTERS.machines.filter(function (x) { return x.code === code; })[0];
   var el = $('machine-hint');
+  var otherWrap = $('machine-other-wrap');
+  if (otherWrap) otherWrap.style.display = code === OTHER_MACHINE_CODE ? 'block' : 'none';
   if (!code) { el.textContent = ''; el.className = 'hint'; return; }
+  if (code === OTHER_MACHINE_CODE) {
+    el.textContent = '⚠️ เครื่องจักรนอกทะเบียน — พิมพ์ชื่อ/ทะเบียนให้ชัด รายการนี้จะถูกติดธงให้เสมียน 1 เพิ่มในทะเบียนก่อนนำเข้าฐานข้อมูล';
+    el.className = 'hint';
+    try { $('f-machine-other').focus(); } catch (e) {}
+    return;
+  }
   if (m) {
     el.textContent = '✓ ' + m.code + ' ' + (m.name || '') + (m.lastmile ? ' | เลขไมล์ล่าสุดในระบบ: ' + m.lastmile : '');
     el.className = 'hint';
@@ -1189,7 +1265,12 @@ function compressPhoto(file) {
 function doSubmitFill(orderId) {
   var code = $('f-machine').value.trim();
   var machine = MASTERS.machines.filter(function (x) { return x.code === code; })[0];
-  if (!machine) { showToast('เลือกเครื่องจักรจากทะเบียนก่อน'); return; }
+  if (code === OTHER_MACHINE_CODE) {
+    var otherName = $('f-machine-other').value.trim();
+    if (otherName.length < 2) { showToast('พิมพ์ชื่อ/ทะเบียนเครื่องจักรก่อน (เลือก "อื่นๆ" ไว้)'); return; }
+    machine = { code: OTHER_MACHINE_CODE, name: otherName };
+  }
+  if (!machine) { showToast('เลือกเครื่องจักรจากรายการ หรือเลือก "อื่นๆ" ก่อน'); return; }
   var siteCode = $('f-site').value.trim();
   var site = MASTERS.sites.filter(function (x) { return x.code === siteCode; })[0];
   if (!site) { showToast('เลือกหน้างานจาก master ก่อน'); return; }
@@ -1325,12 +1406,16 @@ function renderMyFillEdit(fillId, orderId, backTo) {
       '<div class="card"><h3>✏️ แก้ไขรายการ — ' + esc(fillId) + '</h3>' +
       '<div class="muted">แก้ได้จนถึงก่อนส่งรายงานปิดวัน ทุกการแก้ถูกบันทึกใน Log และแจ้งเสมียน 1 ตอนตรวจ</div>' +
       '<label>เครื่องจักร</label>' +
-      comboField({ id: 'm-machine', items: machineItems, value: f['รหัสเครื่องจักร'],
-        title: 'เลือกเครื่องจักรจากทะเบียน', searchPlaceholder: 'พิมพ์รหัสหรือชื่อเครื่องจักร…',
+      comboField({ id: 'm-machine', items: machineItems, value: f['รหัสเครื่องจักร'], otherItem: OTHER_MACHINE_ITEM,
+        title: 'เลือกเครื่องจักรจากทะเบียน', searchPlaceholder: 'พิมพ์รหัส/ชื่อ/ตัวเลข…',
         onChange: function (code) {
+          $('m-machine-other-wrap').style.display = code === OTHER_MACHINE_CODE ? 'block' : 'none';
           var m = MASTERS.machines.filter(function (x) { return x.code === code; })[0];
           autoFillReceiver_('m-receiver', m, null);
         } }) +
+      '<div id="m-machine-other-wrap" style="display:' + (f['รหัสเครื่องจักร'] === OTHER_MACHINE_CODE ? 'block' : 'none') + '">' +
+      '<label>ชื่อ / ทะเบียนเครื่องจักร <span class="req">*พิมพ์เอง</span></label>' +
+      '<input id="m-machine-other" value="' + esc(f['รหัสเครื่องจักร'] === OTHER_MACHINE_CODE ? f['ชื่อเครื่องจักร'] : '') + '"></div>' +
       '<label>หน้างาน</label>' +
       comboField({ id: 'm-site', items: siteItems_(), value: f['รหัสหน้างาน (siteid)'],
         title: 'เลือกหน้างาน', searchPlaceholder: 'พิมพ์ชื่อหรือรหัสหน้างาน…' }) +
@@ -1356,6 +1441,8 @@ function doEditMyFill(fillId, orderId, backTo) {
   if (!qty || qty <= 0) { showToast('จำนวนลิตรต้องมากกว่า 0'); return; }
   var machineCode = $('m-machine').value.trim();
   if (!machineCode) { showToast('เลือกเครื่องจักรก่อน'); return; }
+  var machineOther = machineCode === OTHER_MACHINE_CODE ? $('m-machine-other').value.trim() : '';
+  if (machineCode === OTHER_MACHINE_CODE && machineOther.length < 2) { showToast('พิมพ์ชื่อ/ทะเบียนเครื่องจักรก่อน'); return; }
   var siteCode = $('m-site').value.trim();
   if (!siteCode) { showToast('เลือกหน้างานก่อน'); return; }
   var r = parseReceiverValue_($('m-receiver').value);
@@ -1364,6 +1451,7 @@ function doEditMyFill(fillId, orderId, backTo) {
   var patch = {
     'รหัสเครื่องจักร': machineCode,
     'รหัสหน้างาน (siteid)': siteCode,
+    'ชื่อเครื่องจักร': machineOther || undefined,
     'จำนวนลิตร': String(qty),
     'ผู้รับน้ำมัน': r.name,
     'รหัสผู้รับ (driver_id)': r.code,
