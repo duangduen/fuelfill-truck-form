@@ -203,6 +203,38 @@ function jsonpRequest(qs) {
     document.body.appendChild(script);
   });
 }
+/**
+ * ส่ง POST ตรงด้วย XMLHttpRequest — ทางหลักสำหรับ action ที่มีรูป (12 ก.ย. 2569)
+ * ทำไมเปลี่ยนจาก hidden-iframe: Apps Script ห่อหน้าตอบกลับ (HtmlService) ไว้ในเฟรมซ้อนอีกชั้น
+ * postMessage จากข้างในจึงไปไม่ถึงแอป -> รอจนหมดเวลา 60 วิ ทุกครั้งทั้งที่เซิร์ฟเวอร์บันทึกเสร็จแล้ว
+ * (อาการจริง: "ข้อมูลเข้าชีตแต่ขึ้น error" 3 ก.ย. และ "หมดเวลา" 12 ก.ย.)
+ * XHR ใช้ Content-Type text/plain = "simple request" ไม่มี preflight ที่ Apps Script ไม่รองรับ
+ * ได้ทั้งคำตอบทันที และ % อัปโหลดจริงจาก xhr.upload.onprogress
+ */
+function xhrPostRequest(fields, onProgress) {
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', API_URL, true);
+    xhr.timeout = 90000;
+    xhr.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
+    if (xhr.upload && onProgress) {
+      xhr.upload.onprogress = function (e) { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+      xhr.upload.onload = function () { onProgress(1); };
+    }
+    xhr.onload = function () {
+      var txt = xhr.responseText || '';
+      try { resolve(JSON.parse(txt)); }
+      catch (e) {
+        var err = new Error('เซิร์ฟเวอร์ตอบกลับผิดรูปแบบ (HTTP ' + xhr.status + ')');
+        err.transport = xhr.status === 0 || xhr.status >= 500; // ให้ลองช่องทางสำรอง
+        reject(err);
+      }
+    };
+    xhr.onerror = function () { var err = new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้'); err.transport = true; reject(err); };
+    xhr.ontimeout = function () { reject(new Error('ส่งข้อมูลไม่สำเร็จ (หมดเวลา 90 วินาที)')); };
+    xhr.send(JSON.stringify(fields));
+  });
+}
 function formPostRequest(fields) {
   return new Promise(function (resolve, reject) {
     var iframeName = '__post_frame_' + Date.now();
@@ -299,7 +331,11 @@ function callServer(fnName) {
       if (v != null && typeof v === 'object') v = JSON.stringify(v);
       fields[k] = v == null ? '' : v;
     });
-    return formPostRequest(fields).then(unwrap);
+    // ทางหลัก XHR (รู้ผลทันที + มี % อัปโหลด) -> ถ้าถูกบล็อกระดับเครือข่าย/CORS ค่อยถอยไป hidden-iframe แบบเดิม
+    return xhrPostRequest(fields, window.__uploadProgress).then(unwrap, function (err) {
+      if (!err.transport) throw err;
+      return formPostRequest(fields).then(unwrap);
+    });
   }
   return Promise.reject(new Error('ไม่รู้จักฟังก์ชัน: ' + fnName));
 }
@@ -912,12 +948,17 @@ function doAddReceipt(orderId) {
   busy(true, 'กำลังย่อรูปใบเสร็จ…');
   compressPhoto($('rc-photo').files[0]).then(function (photo) {
     if (!photo) throw new Error('อ่านรูปไม่ได้ ลองถ่ายใหม่');
-    busy(true, 'กำลังส่งใบเสร็จขึ้นเซิร์ฟเวอร์…\nเน็ตช้าอาจใช้เวลาถึง 1 นาที ไม่ต้องกดซ้ำ');
+    busy(true, 'กำลังอัปโหลดใบเสร็จ… 0%\nไม่ต้องกดซ้ำ');
+    window.__uploadProgress = function (p) {
+      busy(true, p >= 1 ? 'อัปโหลดเสร็จ ✓ เซิร์ฟเวอร์กำลังบันทึก…' : 'กำลังอัปโหลดใบเสร็จ… ' + Math.round(p * 100) + '%\nไม่ต้องกดซ้ำ');
+    };
     return callServer('addReceipt', CURRENT_USER.userId, orderId,
       { liters: liters, receiptNo: $('rc-no').value.trim(), clientKey: CURRENT_RECEIPT_KEY }, photo);
   }).then(function (r) {
+    window.__uploadProgress = null;
     finishReceipt_(orderId, r && r.duplicate);
   }).catch(function (err) {
+    window.__uploadProgress = null;
     // เช็คก่อนว่าใบเสร็จเข้าไปแล้วหรือยัง (เน็ตช้าจนหมดเวลา แต่เซิร์ฟเวอร์บันทึกสำเร็จ)
     busy(true, 'ตรวจสอบกับเซิร์ฟเวอร์ว่าบันทึกสำเร็จหรือยัง…');
     callServer('receiptsOfOrder', CURRENT_USER.userId, orderId).then(function (d) {
@@ -1177,15 +1218,19 @@ function doSubmitFill(orderId) {
   var hasPhoto = !!$('f-photo').files[0];
   Promise.all([compressPhoto($('f-photo').files[0]), compressPhoto($('f-photo2').files[0])]).then(function (ph) {
     if (hasPhoto && !ph[0]) throw new Error('อ่านรูปเครื่องจักรไม่ได้ ลองถ่ายใหม่');
-    busy(true, hasPhoto ? 'กำลังส่งข้อมูล + รูปขึ้นเซิร์ฟเวอร์…\nเน็ตช้าอาจใช้เวลาถึง 1 นาที\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ' : 'กำลังส่งข้อมูล…');
+    busy(true, hasPhoto ? 'กำลังอัปโหลดรูป… 0%\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ' : 'กำลังส่งข้อมูล…');
+    window.__uploadProgress = function (p) {
+      busy(true, p >= 1 ? 'อัปโหลดรูปเสร็จ ✓ เซิร์ฟเวอร์กำลังบันทึก…\n(ปกติ 5–15 วินาที)' : 'กำลังอัปโหลดรูป… ' + Math.round(p * 100) + '%\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ');
+    };
     return callServer('submitFill', CURRENT_USER.userId, payload, ph[0], ph[1]);
   }).then(function (d) {
+    window.__uploadProgress = null;
     finishFill_(orderId, site.code, d);
   }).catch(function (err) {
+    window.__uploadProgress = null;
     // ส่งไม่ผ่าน/หมดเวลา — อาจบันทึกสำเร็จแล้วก็ได้ ตรวจกับเซิร์ฟเวอร์ก่อนบอกผู้ใช้ว่า error
-    busy(true, 'ตรวจสอบกับเซิร์ฟเวอร์ว่าบันทึกสำเร็จหรือยัง…');
-    callServer('fillsOfOrder', CURRENT_USER.userId, orderId).then(function (fills) {
-      var hit = fills.filter(function (f) { return f['Client Key'] === CURRENT_FILL_KEY; })[0];
+    // ถามซ้ำได้ถึง 4 รอบ (ห่างกัน 8 วิ) เผื่อเซิร์ฟเวอร์ยังเขียนไม่เสร็จตอนถามรอบแรก
+    verifyFillSaved_(orderId, CURRENT_FILL_KEY, 4).then(function (hit) {
       if (hit) {
         finishFill_(orderId, site.code, { fillId: hit['Fill ID'], flags: String(hit['ธงเตือน'] || '').split(',').filter(String), recovered: true });
       } else {
@@ -1199,6 +1244,20 @@ function doSubmitFill(orderId) {
       alert('⚠️ ส่งข้อมูลไม่สำเร็จ และตรวจสอบกับเซิร์ฟเวอร์ไม่ได้ (' + err.message + ')\n\nเช็คสัญญาณแล้วกดบันทึกใหม่ — ถ้ารายการเข้าไปแล้วระบบจะไม่บันทึกซ้ำ');
     });
   });
+}
+/** ถามเซิร์ฟเวอร์ว่ารายการที่มี clientKey นี้ถูกบันทึกหรือยัง — ลองซ้ำหลายรอบเผื่อเซิร์ฟเวอร์ยังทำงานอยู่ */
+function verifyFillSaved_(orderId, key, attempts) {
+  var n = 0;
+  function once() {
+    n++;
+    busy(true, 'ตรวจสอบกับเซิร์ฟเวอร์ว่าบันทึกสำเร็จหรือยัง… (รอบ ' + n + '/' + attempts + ')');
+    return callServer('fillsOfOrder', CURRENT_USER.userId, orderId).then(function (fills) {
+      var hit = fills.filter(function (f) { return f['Client Key'] === key; })[0];
+      if (hit || n >= attempts) return hit || null;
+      return new Promise(function (r) { setTimeout(r, 8000); }).then(once);
+    });
+  }
+  return once();
 }
 /** จบการบันทึก 1 รายการ — ใช้ทั้งกรณีสำเร็จปกติ และกรณีกู้ผลจากเซิร์ฟเวอร์หลังหมดเวลา */
 function finishFill_(orderId, siteCode, d) {
