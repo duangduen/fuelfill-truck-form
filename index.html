@@ -272,6 +272,9 @@ function formPostRequest(fields) {
 }
 
 var GET_ACTION_ARGS = {
+  // โหลดรวมคำขอเดียว (Screens.gs) — เปิดแอป / เปิดหน้าจอ ใช้ 2 ตัวนี้เป็นหลัก
+  bootstrap: ['userId', 'mastersVersion', 'view', 'orderId'],
+  screen: ['userId', 'name', 'params'],
   whoAmI: ['userId'],
   machineList: [], siteList: [], fuelList: [], tankList: [], poLocationList: [], receiverList: [],
   lastRemaining: ['tank'],
@@ -304,9 +307,17 @@ var POST_ACTION_ARGS = {
   addReceipt: ['userId', 'orderId', 'payload', 'photo'] // รูปใบเสร็จปั๊ม 1 ใบต่อครั้ง
 };
 GET_ACTION_ARGS.recordLoad = ['userId', 'orderId', 'payload'];
+// action ที่ "อ่านอย่างเดียว" — action อื่นถือว่าเขียนข้อมูล และจะล้างแคชหน้าจอ (SCREEN_CACHE) ทันทีที่เรียก
+var READ_ACTIONS = {
+  bootstrap: 1, screen: 1, whoAmI: 1, machineList: 1, siteList: 1, fuelList: 1, tankList: 1, poLocationList: 1, receiverList: 1,
+  lastRemaining: 1, myOrders: 1, myOrderHistory: 1, pendingIssue: 1, activeOrders: 1, orderHistory: 1, fillsOfOrder: 1,
+  pendingReview: 1, importedPendingAudit: 1, importFailed: 1, dashboard: 1, receiptsOfOrder: 1,
+  stationPending: 1, stationDaily: 1, stationHistory: 1, apPending: 1, apMonthly: 1
+};
 
 function callServer(fnName) {
   var args = Array.prototype.slice.call(arguments, 1);
+  if (!READ_ACTIONS[fnName]) SCREEN_CACHE = {}; // เขียนอะไรก็ตาม -> หน้าจอถัดไปต้องโหลดใหม่จากเซิร์ฟเวอร์
   function buildQs(keys) {
     var qs = 'action=' + fnName;
     keys.forEach(function (k, i) {
@@ -600,24 +611,132 @@ function init() {
     });
   }
   boot.then(function (userId) {
-    return callServer('whoAmI', userId).then(function (me) {
-      if (me.testMode) $('banner-test').style.display = 'block';
-      if (!me.registered) { renderNotRegistered(userId); return; }
-      if (!me.active) {
-        $('main').innerHTML = '<div class="card"><h3>บัญชีถูกปิดใช้งาน</h3><div class="muted">กรุณาติดต่อเสมียน 1 หรือผู้ดูแลระบบ</div></div>';
-        return;
-      }
-      CURRENT_USER = { userId: userId, name: me.name, roles: me.roles, defaultTank: me.defaultTank || '' };
-      $('who').innerHTML = esc(me.name) + '<br>' + esc(me.roles.join(', '));
-      buildNav();
-      loadMasters();
-      var dl = deepLinkParams_();
+    // เปิดแอป = คำขอเดียว (bootstrap) แทน 8 คำขอเดิม; master ที่เคยโหลดแล้วเก็บไว้ในเครื่อง ส่งเวอร์ชันไปเช็คแทนการโหลดใหม่
+    loadMastersFromStorage_();
+    var dl = deepLinkParams_();
+    return callServer('bootstrap', userId, MASTERS_VERSION, dl.view, dl.order).then(function (b) {
+      if (!enterApp_(userId, b.me)) return;
+      if (b.masters) applyMasters_(b.masters, b.mastersVersion);
+      else if (!MASTERS_VERSION) loadMasters(); // ไม่ควรเกิด — เผื่อไว้
+      primeBootScreens_(b);
       openDeepLink_(dl.view, dl.order);
+    }, function (err) {
+      // เซิร์ฟเวอร์ยังเป็นเวอร์ชันเก่า (ยังไม่ได้ deploy Screens.gs) -> ใช้วิธีเดิม
+      if (!/bootstrap/.test(err.message)) throw err;
+      LEGACY_SERVER = true;
+      return callServer('whoAmI', userId).then(function (me) {
+        if (!enterApp_(userId, me)) return;
+        loadMasters();
+        openDeepLink_(dl.view, dl.order);
+      });
     });
   }).catch(function (err) {
     $('main').innerHTML = '<div class="card"><h3>เข้าระบบไม่ได้</h3><div class="muted">' + esc(err.message) + '</div>' +
       '<button class="btn-secondary" onclick="location.reload()">ลองใหม่</button></div>';
   });
+}
+
+/** ตั้งค่าผู้ใช้ + nav หลังรู้ตัวตน — คืน false ถ้าเข้าใช้ไม่ได้ (ยังไม่ลงทะเบียน/ถูกปิด) */
+function enterApp_(userId, me) {
+  if (me.testMode) $('banner-test').style.display = 'block';
+  if (!me.registered) { renderNotRegistered(userId); return false; }
+  if (!me.active) {
+    $('main').innerHTML = '<div class="card"><h3>บัญชีถูกปิดใช้งาน</h3><div class="muted">กรุณาติดต่อเสมียน 1 หรือผู้ดูแลระบบ</div></div>';
+    return false;
+  }
+  CURRENT_USER = { userId: userId, name: me.name, roles: me.roles, defaultTank: me.defaultTank || '' };
+  $('who').innerHTML = esc(me.name) + '<br>' + esc(me.roles.join(', '));
+  buildNav();
+  return true;
+}
+
+/* ---- แคชข้อมูลหน้าจอในเครื่อง (สั้น ๆ) ----
+   1 หน้า = 1 คำขอ 'screen' ที่คืนข้อมูลทุกแท็บย่อย -> สลับแท็บ/กดย้อนกลับได้ทันที
+   ล้างอัตโนมัติเมื่อมีการเขียนข้อมูลใด ๆ (ดู callServer) และหมดอายุเองใน SCREEN_CACHE_MS
+   กดเมนูล่าง (nav) = อยากเห็นของใหม่ -> โหลดใหม่เสมอ */
+var SCREEN_CACHE = {};
+var SCREEN_CACHE_MS = 60000;
+function screenKey_(name, params) { return name + ':' + JSON.stringify(params || {}); }
+function screenParams_(name) {
+  if (name === 'station') return { date: window.STATION_DATE || '' };
+  if (name === 'ap') return { yyyymm: window.AP_YM || '' };
+  return {};
+}
+function screenData_(name, params, fresh) {
+  params = params || {};
+  var key = screenKey_(name, params), hit = SCREEN_CACHE[key];
+  if (!fresh && hit && Date.now() - hit.t < SCREEN_CACHE_MS) return Promise.resolve(hit.data);
+  var req = LEGACY_SERVER ? legacyScreen_(name, params)
+    : callServer('screen', CURRENT_USER.userId, name, params).then(null, function (err) {
+      if (!/ไม่รู้จัก action/.test(err.message)) throw err;
+      LEGACY_SERVER = true; // Apps Script ยังเป็นเวอร์ชันก่อน Screens.gs
+      return legacyScreen_(name, params);
+    });
+  return req.then(function (d) {
+    SCREEN_CACHE[key] = { t: Date.now(), data: d };
+    return d;
+  });
+}
+/* ทางสำรองเมื่อเซิร์ฟเวอร์ยังไม่มี action 'screen' (index.html บน GitHub ถูกอัปเดตก่อน deploy Apps Script):
+   ประกอบข้อมูลหน้าจอจาก action ย่อยแบบเดิม — ช้ากว่า แต่ใช้งานได้ */
+var LEGACY_SERVER = false;
+function legacyScreen_(name, p) {
+  var u = CURRENT_USER.userId;
+  var C = function () { return callServer.apply(null, arguments); };
+  var safe = function (pr, dflt) { return pr.then(null, function () { return dflt; }); };
+  var NONE = { remaining: null, pumpMeter: null };
+  switch (name) {
+    case 'driver': return C('myOrders', u).then(function (o) { return { orders: o }; });
+    case 'load':
+      return Promise.all([C('myOrders', u), C('receiptsOfOrder', u, p.orderId)]).then(function (r) {
+        var o = r[0].filter(function (x) { return x['Order ID'] === p.orderId; })[0];
+        return (o ? safe(C('lastRemaining', o['รถน้ำมัน']), NONE) : Promise.resolve(NONE))
+          .then(function (l) { return { orders: r[0], receipts: r[1], lastRemaining: l }; });
+      });
+    case 'eod': return Promise.all([C('myOrders', u), C('fillsOfOrder', u, p.orderId)]).then(function (r) { return { orders: r[0], fills: r[1] }; });
+    case 'fills': return C('fillsOfOrder', u, p.orderId).then(function (f) { return { fills: f }; });
+    case 'clerk1':
+      return Promise.all([C('pendingIssue', u), C('pendingReview', u), C('activeOrders', u), C('importFailed', u)])
+        .then(function (r) { return { pendingIssue: r[0], pendingReview: r[1], activeOrders: r[2], importFailed: r[3] }; });
+    case 'clerk2':
+      return Promise.all([C('importedPendingAudit', u), C('importFailed', u)]).then(function (r) { return { importedPendingAudit: r[0], importFailed: r[1] }; });
+    case 'station':
+      return Promise.all([C('stationPending', u), C('stationDaily', u, p.date || todayDdMmYyyy()), C('stationHistory', u)])
+        .then(function (r) { return { pending: r[0], daily: r[1], history: r[2] }; });
+    case 'ap':
+      return Promise.all([C('apPending', u), C('apMonthly', u, p.yyyymm || '')]).then(function (r) { return { pending: r[0], monthly: r[1] }; });
+    case 'dashboard': return C('dashboard', u);
+    default: return Promise.reject(new Error('ไม่รู้จักหน้าจอ: ' + name));
+  }
+}
+function primeScreen_(name, params, data) {
+  if (data) SCREEN_CACHE[screenKey_(name, params)] = { t: Date.now(), data: data };
+}
+/** เอาข้อมูลหน้าแรก (+ หน้า deep link) ที่ bootstrap แนบมา ใส่แคชไว้ ให้ openDeepLink_ เปิดได้โดยไม่ต้องยิงซ้ำ */
+function primeBootScreens_(b) {
+  if (b.view && b.screen) primeScreen_(b.view, screenParams_(b.view), b.screen);
+  if (b.deep && b.deep.data) primeScreen_(b.deep.view, { orderId: b.deep.orderId }, b.deep.data);
+}
+
+/* ---- master ในเครื่อง (localStorage) ----
+   ทะเบียนเครื่องจักร/หน้างาน/ฯลฯ เปลี่ยนแค่คืนละครั้ง ไม่ต้องโหลดใหม่ทุกครั้งที่เปิดแอป
+   เก็บพร้อม "เวอร์ชัน" (จำนวนแถว+เวลา sync ทุกแท็บ) -> bootstrap ส่งเวอร์ชันไปถาม เซิร์ฟเวอร์ส่ง master มาเฉพาะเมื่อเปลี่ยน */
+var MASTERS_LS_KEY = 'fuel_masters_v1';
+var MASTERS_VERSION = '';
+function loadMastersFromStorage_() {
+  try {
+    var j = JSON.parse(localStorage.getItem(MASTERS_LS_KEY) || 'null');
+    if (!j || !j.version || !j.masters) return false;
+    Object.keys(MASTER_LOADERS).forEach(function (k) { MASTERS[k] = j.masters[k] || []; });
+    MASTERS_VERSION = j.version;
+    return true;
+  } catch (e) { return false; }
+}
+function applyMasters_(m, version) {
+  Object.keys(MASTER_LOADERS).forEach(function (k) { if (m[k]) MASTERS[k] = m[k].items || []; });
+  if (m.machines && m.machines.stale) $('banner-stale').style.display = 'block';
+  MASTERS_VERSION = version || '';
+  try { localStorage.setItem(MASTERS_LS_KEY, JSON.stringify({ version: MASTERS_VERSION, masters: MASTERS, savedAt: Date.now() })); } catch (e) { /* โหมดส่วนตัว/พื้นที่เต็ม — ไม่เป็นไร */ }
 }
 
 function renderNotRegistered(userId) {
@@ -669,8 +788,9 @@ function openDeepLink_(view, orderId) {
   if (!spec || !hasRole(ROLES.DRIVER)) { navigate(defaultView()); return; }
   setNavActive_('driver');
   busy(true, 'กำลังเปิดใบสั่งของคุณ…');
-  callServer('myOrders', CURRENT_USER.userId).then(function (orders) {
+  screenData_('driver').then(function (d) {
     busy(false);
+    var orders = d.orders;
     var o = orderId ? orders.filter(function (x) { return x['Order ID'] === orderId; })[0] : null;
     if (o && spec.want.indexOf(o['สถานะ']) === -1) o = null; // ใบที่ระบุมาอยู่ในสถานะที่ทำหน้านี้ไม่ได้แล้ว
     if (!o) o = orders.filter(function (x) { return spec.want.indexOf(x['สถานะ']) !== -1; })[0];
@@ -696,11 +816,13 @@ function buildNav() {
   items.push({ id: 'dashboard', ico: '📊', label: 'ภาพรวม' });
   var nav = $('nav');
   nav.innerHTML = items.map(function (it) {
-    return '<button id="nav-' + it.id + '" onclick="navigate(\'' + it.id + '\')"><span class="ico">' + it.ico + '</span>' + it.label + '</button>';
+    return '<button id="nav-' + it.id + '" onclick="navigate(\'' + it.id + '\', true)"><span class="ico">' + it.ico + '</span>' + it.label + '</button>';
   }).join('');
   nav.style.display = 'flex';
 }
-function navigate(view) {
+/** fromNav = ผู้ใช้กดเมนูล่างเอง -> ทิ้งแคชหน้าจอ โหลดของใหม่เสมอ (เปิดจาก deep link/ย้อนกลับ ใช้แคชได้) */
+function navigate(view, fromNav) {
+  if (fromNav) SCREEN_CACHE = {};
   document.querySelectorAll('nav button').forEach(function (b) { b.classList.remove('active'); });
   var btn = $('nav-' + view);
   if (btn) btn.classList.add('active');
@@ -772,8 +894,9 @@ function ensureMasters(keys) {
 /* ================================ คนขับรถน้ำมัน ================================ */
 function renderDriverHome() {
   busy(true);
-  callServer('myOrders', CURRENT_USER.userId).then(function (orders) {
+  screenData_('driver').then(function (d) {
     busy(false);
+    var orders = d.orders;
     var html = '';
     if (!orders.length) {
       html += '<div class="card"><h3>ยังไม่มีใบสั่งที่กำลังทำงาน</h3>' +
@@ -899,12 +1022,10 @@ function doRequestOrder() {
 var LOAD_ORDER = null; // ใบสั่งที่กำลังเปิดหน้ารับน้ำมัน
 function renderLoadForm(orderId) {
   busy(true);
-  Promise.all([
-    callServer('myOrders', CURRENT_USER.userId),
-    callServer('receiptsOfOrder', CURRENT_USER.userId, orderId)
-  ]).then(function (res) {
+  // คำขอเดียวได้ครบ: ใบสั่ง + ใบเสร็จของใบนี้ + ยอดคงเหลือครั้งก่อน (เดิม 3 คำขอต่อกัน)
+  screenData_('load', { orderId: orderId }).then(function (res) {
     busy(false);
-    var o = res[0].filter(function (x) { return x['Order ID'] === orderId; })[0];
+    var o = res.orders.filter(function (x) { return x['Order ID'] === orderId; })[0];
     if (!o) { showToast('ไม่พบใบสั่ง'); renderDriverHome(); return; }
     LOAD_ORDER = o;
     var loaded = o['สถานะ'] === 'รับน้ำมันแล้ว กำลังจ่ายหน้างาน';
@@ -941,21 +1062,20 @@ function renderLoadForm(orderId) {
           '<div class="calcbox" id="load-calc">รวมในถังหลังรับ: —</div>' +
           '<button class="btn-primary" onclick="doRecordLoad(\'' + orderId + '\')">✅ ยืนยันรับน้ำมันครบ</button>' +
           '<button class="btn-secondary" onclick="renderDriverHome()">ย้อนกลับ</button></div>');
-    renderReceiptList(res[1]);
+    renderReceiptList(res.receipts);
     if (!loaded) {
-      callServer('lastRemaining', o['รถน้ำมัน']).then(function (d) {
-        if (d.remaining != null) {
-          $('f-carry').value = d.remaining;
-          $('carry-hint').textContent = 'ยอดคงเหลือวัดจริงจากใบสั่งก่อนหน้าของรถคันนี้ = ' + d.remaining + ' ล. (แก้ได้ถ้าวัดจริงต่างจากนี้)';
-        } else {
-          $('carry-hint').textContent = 'ไม่พบข้อมูลครั้งก่อน — กรอกยอดที่วัดได้ในถังตอนนี้';
-        }
-        if (d.pumpMeter != null && !$('f-pumpstart').value) {
-          $('f-pumpstart').value = d.pumpMeter;
-          $('pump-hint').textContent = 'ดึงจากเลขตู้จ่าย (หลัง) ของใบสั่งก่อนหน้า = ' + d.pumpMeter + ' — ถ้าไม่ตรงหน้ามิเตอร์ให้แก้ตามจริง';
-        }
-        calcLoad();
-      }).catch(function () { $('carry-hint').textContent = 'ดึงยอดครั้งก่อนไม่สำเร็จ — กรอกเอง'; });
+      var d = res.lastRemaining || {};
+      if (d.remaining != null) {
+        $('f-carry').value = d.remaining;
+        $('carry-hint').textContent = 'ยอดคงเหลือวัดจริงจากใบสั่งก่อนหน้าของรถคันนี้ = ' + d.remaining + ' ล. (แก้ได้ถ้าวัดจริงต่างจากนี้)';
+      } else {
+        $('carry-hint').textContent = 'ไม่พบข้อมูลครั้งก่อน — กรอกยอดที่วัดได้ในถังตอนนี้';
+      }
+      if (d.pumpMeter != null && !$('f-pumpstart').value) {
+        $('f-pumpstart').value = d.pumpMeter;
+        $('pump-hint').textContent = 'ดึงจากเลขตู้จ่าย (หลัง) ของใบสั่งก่อนหน้า = ' + d.pumpMeter + ' — ถ้าไม่ตรงหน้ามิเตอร์ให้แก้ตามจริง';
+      }
+      calcLoad();
     }
   }).catch(errBack);
 }
@@ -1354,9 +1474,13 @@ function finishFill_(orderId, siteCode, d) {
 }
 
 /* ---- รายการจ่ายของใบสั่ง ---- */
+/** รายการจ่ายของใบสั่ง (ผ่านแคชหน้าจอ — เปิดหน้าแก้ไข/ย้อนกลับได้ทันทีโดยไม่ยิงซ้ำ) */
+function fillsOf_(orderId) {
+  return screenData_('fills', { orderId: orderId }).then(function (d) { return d.fills; });
+}
 function renderOrderFills(orderId, backTo) {
   busy(true);
-  callServer('fillsOfOrder', CURRENT_USER.userId, orderId).then(function (fills) {
+  fillsOf_(orderId).then(function (fills) {
     busy(false);
     var rowsHtml = fills.map(function (f) {
       var cancelled = f['สถานะรายการ'] !== 'ปกติ';
@@ -1390,7 +1514,7 @@ function renderOrderFills(orderId, backTo) {
 function renderMyFillEdit(fillId, orderId, backTo) {
   ensureMasters(['machines', 'sites', 'receivers']).then(function () {
     busy(true, 'กำลังโหลดรายการ…');
-    return callServer('fillsOfOrder', CURRENT_USER.userId, orderId);
+    return fillsOf_(orderId);
   }).then(function (fills) {
     busy(false);
     var f = fills.filter(function (x) { return x['Fill ID'] === fillId; })[0];
@@ -1482,14 +1606,11 @@ function doCancelFill(fillId, orderId, backTo) {
 /* ---- ปิดวัน ---- */
 function renderEodForm(orderId) {
   busy(true);
-  Promise.all([
-    callServer('myOrders', CURRENT_USER.userId),
-    callServer('fillsOfOrder', CURRENT_USER.userId, orderId)
-  ]).then(function (res) {
+  screenData_('eod', { orderId: orderId }).then(function (res) {
     busy(false);
-    var o = res[0].filter(function (x) { return x['Order ID'] === orderId; })[0];
+    var o = res.orders.filter(function (x) { return x['Order ID'] === orderId; })[0];
     if (!o) { renderDriverHome(); return; }
-    var fills = res[1].filter(function (f) { return f['สถานะรายการ'] === 'ปกติ'; });
+    var fills = res.fills.filter(function (f) { return f['สถานะรายการ'] === 'ปกติ'; });
     var totalOut = fills.reduce(function (s, f) { return s + (num(f['จำนวนลิตร']) || 0); }, 0);
     totalOut = Math.round(totalOut * 100) / 100;
     var carry = num(o['ยอดยกมาในถัง (ลิตร)']) || 0;
@@ -1554,8 +1675,10 @@ function renderClerk1(tab) {
     '<button class="' + (tab === 'failed' ? 'active' : '') + '" onclick="renderClerk1(\'failed\')">❌ นำเข้าไม่สำเร็จ</button>' +
     '</div>';
   busy(true);
+  // ข้อมูลทั้ง 4 แท็บมาในคำขอเดียว (screen clerk1) — สลับแท็บไม่ต้องรอเซิร์ฟเวอร์
+  var C1 = screenData_('clerk1');
   if (tab === 'issue') {
-    callServer('pendingIssue', CURRENT_USER.userId).then(function (orders) {
+    C1.then(function (d) { return d.pendingIssue; }).then(function (orders) {
       busy(false);
       var html = tabs;
       if (!orders.length) html += '<div class="empty">ไม่มีคำขอค้าง</div>';
@@ -1569,7 +1692,7 @@ function renderClerk1(tab) {
       $('main').innerHTML = html;
     }).catch(errBack);
   } else if (tab === 'review') {
-    callServer('pendingReview', CURRENT_USER.userId).then(function (orders) {
+    C1.then(function (d) { return d.pendingReview; }).then(function (orders) {
       busy(false);
       var html = tabs;
       if (!orders.length) html += '<div class="empty">ไม่มีรายงานค้างตรวจ</div>';
@@ -1587,7 +1710,7 @@ function renderClerk1(tab) {
       $('main').innerHTML = html;
     }).catch(errBack);
   } else if (tab === 'active') {
-    callServer('activeOrders', CURRENT_USER.userId).then(function (orders) {
+    C1.then(function (d) { return d.activeOrders; }).then(function (orders) {
       busy(false);
       var html = tabs;
       if (!orders.length) html += '<div class="empty">ไม่มีใบสั่งที่กำลังทำงาน</div>';
@@ -1600,7 +1723,7 @@ function renderClerk1(tab) {
       $('main').innerHTML = html;
     }).catch(errBack);
   } else {
-    callServer('importFailed', CURRENT_USER.userId).then(function (fills) {
+    C1.then(function (d) { return d.importFailed; }).then(function (fills) {
       busy(false);
       var html = tabs;
       if (!fills.length) html += '<div class="empty">ไม่มีรายการนำเข้าไม่สำเร็จ 🎉</div>';
@@ -1620,7 +1743,7 @@ function renderIssueForm(orderId) {
 }
 function renderIssueForm_(orderId) {
   busy(true);
-  callServer('pendingIssue', CURRENT_USER.userId).then(function (orders) {
+  screenData_('clerk1').then(function (d) { return d.pendingIssue; }).then(function (orders) {
     busy(false);
     var o = orders.filter(function (x) { return x['Order ID'] === orderId; })[0];
     if (!o) { renderClerk1(); return; }
@@ -1656,8 +1779,8 @@ function doIssueOrder(orderId) {
 function renderReviewDetail(orderId) {
   busy(true);
   Promise.all([
-    callServer('pendingReview', CURRENT_USER.userId),
-    callServer('fillsOfOrder', CURRENT_USER.userId, orderId)
+    screenData_('clerk1').then(function (d) { return d.pendingReview; }), // มักอยู่ในแคชแล้ว (เพิ่งมาจากแท็บรอตรวจ)
+    fillsOf_(orderId)
   ]).then(function (res) {
     busy(false);
     var o = res[0].filter(function (x) { return x['Order ID'] === orderId; })[0];
@@ -1716,7 +1839,7 @@ function renderEditFill(fillId, orderId) {
 }
 function renderEditFill_(fillId, orderId) {
   busy(true);
-  callServer('fillsOfOrder', CURRENT_USER.userId, orderId).then(function (fills) {
+  fillsOf_(orderId).then(function (fills) {
     busy(false);
     var f = fills.filter(function (x) { return x['Fill ID'] === fillId; })[0];
     if (!f) { renderClerk1('review'); return; }
@@ -1796,8 +1919,9 @@ function renderClerk2(tab) {
     '<button class="' + (tab === 'failed' ? 'active' : '') + '" onclick="renderClerk2(\'failed\')">❌ นำเข้าไม่สำเร็จ</button>' +
     '</div>';
   busy(true);
+  var C2 = screenData_('clerk2'); // ทั้ง 2 แท็บในคำขอเดียว
   if (tab === 'audit') {
-    callServer('importedPendingAudit', CURRENT_USER.userId).then(function (fills) {
+    C2.then(function (d) { return d.importedPendingAudit; }).then(function (fills) {
       busy(false);
       var html = tabs;
       if (!fills.length) { $('main').innerHTML = html + '<div class="empty">ไม่มีรายการรอตรวจ 🎉</div>'; return; }
@@ -1821,7 +1945,7 @@ function renderClerk2(tab) {
       $('main').innerHTML = html;
     }).catch(errBack);
   } else {
-    callServer('importFailed', CURRENT_USER.userId).then(function (fills) {
+    C2.then(function (d) { return d.importFailed; }).then(function (fills) {
       busy(false);
       var html = tabs;
       if (!fills.length) html += '<div class="empty">ไม่มีรายการนำเข้าไม่สำเร็จ 🎉</div>';
@@ -1867,8 +1991,9 @@ var STATION_LAST_PRICES = {};
 function renderStation(tab) {
   tab = tab || 'pending';
   busy(true);
+  var ST = screenData_('station', screenParams_('station')); // รอตรวจ + สรุปวัน + ประวัติ ในคำขอเดียว
   if (tab === 'pending') {
-    callServer('stationPending', CURRENT_USER.userId).then(function (d) {
+    ST.then(function (d) { return d.pending; }).then(function (d) {
       busy(false);
       STATION_LAST_PRICES = d.lastPrices || {};
       var html = stationTabs(tab);
@@ -1888,13 +2013,12 @@ function renderStation(tab) {
       $('main').innerHTML = html;
     }).catch(errBack);
   } else if (tab === 'daily') {
-    var date = (window.STATION_DATE || todayDdMmYyyy());
-    callServer('stationDaily', CURRENT_USER.userId, date).then(function (sm) {
+    ST.then(function (d) { return d.daily; }).then(function (sm) {
       busy(false);
       $('main').innerHTML = stationTabs(tab) + stationSummaryHtml(sm, true);
     }).catch(errBack);
   } else {
-    callServer('stationHistory', CURRENT_USER.userId).then(function (rows) {
+    ST.then(function (d) { return d.history; }).then(function (rows) {
       busy(false);
       var html = stationTabs(tab);
       if (!rows.length) html += '<div class="empty">ยังไม่มีประวัติ</div>';
@@ -1996,8 +2120,9 @@ function apTabs(active) {
 function renderAp(tab) {
   tab = tab || 'pending';
   busy(true);
+  var AP = screenData_('ap', screenParams_('ap')); // รอคีย์ + สรุปเดือน ในคำขอเดียว
   if (tab === 'pending') {
-    callServer('apPending', CURRENT_USER.userId).then(function (rows) {
+    AP.then(function (d) { return d.pending; }).then(function (rows) {
       busy(false);
       var html = apTabs(tab);
       if (!rows.length) { $('main').innerHTML = html + '<div class="empty">ไม่มีใบเสร็จรอคีย์ fuel_ap 🎉</div>'; return; }
@@ -2034,7 +2159,7 @@ function renderAp(tab) {
     }).catch(errBack);
   } else {
     var ym = window.AP_YM || '';
-    callServer('apMonthly', CURRENT_USER.userId, ym).then(function (sm) {
+    AP.then(function (d) { return d.monthly; }).then(function (sm) {
       busy(false);
       var d = new Date();
       var cur = ym || (d.getFullYear() + ('0' + (d.getMonth() + 1)).slice(-2));
@@ -2059,7 +2184,7 @@ function doMarkAp() {
 /* ================================ Dashboard ================================ */
 function renderDashboard() {
   busy(true);
-  callServer('dashboard', CURRENT_USER.userId).then(function (d) {
+  screenData_('dashboard').then(function (d) {
     busy(false);
     var varRows = d.recentVariance.map(function (r) {
       var v = num(r.variance);
