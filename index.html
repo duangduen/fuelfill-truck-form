@@ -1363,13 +1363,14 @@ function previewPhoto(inputId, imgId) {
   img.src = URL.createObjectURL(f);
   img.style.display = 'block';
 }
-/** ย่อรูปเป็น JPEG base64 (กว้างสุด 1280px) — ลดขนาด payload แบบเดียวกับระบบขอย้ายฯ */
+/** ย่อรูปเป็น JPEG base64 (กว้างสุด PHOTO_MAX_W px) — ลดขนาด payload แบบเดียวกับระบบขอย้ายฯ */
+var PHOTO_MAX_W = 800; // 1280 → 1000 (3 ก.ย.) → 800 (14 ก.ย. 2569): ไฟล์เบาลงอีก ~35% เลขข้างเครื่อง/เลขไมล์/ใบเสร็จยังอ่านออก
 function compressPhoto(file) {
   return new Promise(function (resolve) {
     if (!file) { resolve(null); return; }
     var img = new Image();
     img.onload = function () {
-      var maxW = 1000; // เดิม 1280 — เล็กลงนิดเดียวแต่ไฟล์เบาลง ~40% อัปโหลดผ่าน 4G ที่หน้างานเร็วขึ้นชัด
+      var maxW = PHOTO_MAX_W;
       var scale = Math.min(1, maxW / img.width);
       var canvas = document.createElement('canvas');
       canvas.width = Math.round(img.width * scale);
