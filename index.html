@@ -185,7 +185,7 @@ var DEFAULT_PO_LOCATION_CODE = '10401'; // สถานที่รับน้�
 var CURRENT_USER = null; // {userId, name, roles:[...], defaultTank}
 var MASTERS = { machines: [], sites: [], fuels: [], tanks: [], poLocations: [], receivers: [] };
 var ROLES = { DRIVER: 'คนขับรถน้ำมัน', CLERK1: 'เสมียน1', CLERK2: 'เสมียน2',
-  STATION_CLERK1: 'เสมียนปั๊ม1', STATION_CLERK2: 'เสมียนปั๊ม2', ADMIN: 'ผู้ดูแล' };
+  STATION_CLERK1: 'เสมียนปั๊ม1', STATION_CLERK2: 'เสมียนปั๊ม2', APPROVER: 'ผู้อนุมัติ', ADMIN: 'ผู้ดูแล' };
 
 /* ================================ JSONP / POST bridge (pattern ระบบขอย้ายฯ) ================================ */
 var jsonpCounter = 0;
@@ -283,6 +283,8 @@ var GET_ACTION_ARGS = {
   fillsOfOrder: ['userId', 'orderId'],
   pendingReview: ['userId'], importedPendingAudit: ['userId'], importFailed: ['userId'],
   dashboard: ['userId'],
+  // ผู้อนุมัติ (เจ้านาย) — อนุมัติใบสั่งก่อนถึงมือคนขับ
+  pendingApproval: ['userId'], approvalHistory: ['userId'], approveOrder: ['userId', 'orderId'], rejectOrder: ['userId', 'orderId', 'reason'],
   requestOrder: ['userId', 'payload'],
   cancelOrder: ['userId', 'orderId', 'reason'],
   issueOrder: ['userId', 'orderId', 'patch'],
@@ -311,7 +313,7 @@ GET_ACTION_ARGS.recordLoad = ['userId', 'orderId', 'payload'];
 var READ_ACTIONS = {
   bootstrap: 1, screen: 1, whoAmI: 1, machineList: 1, siteList: 1, fuelList: 1, tankList: 1, poLocationList: 1, receiverList: 1,
   lastRemaining: 1, myOrders: 1, myOrderHistory: 1, pendingIssue: 1, activeOrders: 1, orderHistory: 1, fillsOfOrder: 1,
-  pendingReview: 1, importedPendingAudit: 1, importFailed: 1, dashboard: 1, receiptsOfOrder: 1,
+  pendingReview: 1, importedPendingAudit: 1, importFailed: 1, dashboard: 1, receiptsOfOrder: 1, pendingApproval: 1, approvalHistory: 1,
   stationPending: 1, stationDaily: 1, stationHistory: 1, apPending: 1, apMonthly: 1
 };
 
@@ -705,6 +707,8 @@ function legacyScreen_(name, p) {
         .then(function (r) { return { pending: r[0], daily: r[1], history: r[2] }; });
     case 'ap':
       return Promise.all([C('apPending', u), C('apMonthly', u, p.yyyymm || '')]).then(function (r) { return { pending: r[0], monthly: r[1] }; });
+    case 'approve':
+      return Promise.all([C('pendingApproval', u), safe(C('approvalHistory', u), [])]).then(function (r) { return { pending: r[0], history: r[1] }; });
     case 'dashboard': return C('dashboard', u);
     default: return Promise.reject(new Error('ไม่รู้จักหน้าจอ: ' + name));
   }
@@ -778,7 +782,7 @@ var DRIVER_DEEP_VIEWS = {
 };
 function openDeepLink_(view, orderId) {
   if (!view) { navigate(defaultView()); return; }
-  var roleViews = ['driver', 'clerk1', 'clerk2', 'station', 'ap', 'dashboard'];
+  var roleViews = ['driver', 'clerk1', 'clerk2', 'station', 'ap', 'approve', 'dashboard'];
   if (roleViews.indexOf(view) !== -1) {
     // ไปหน้าบทบาทได้เฉพาะที่มีสิทธิ์ (มีปุ่มใน nav) ไม่งั้นกลับหน้าประจำ
     navigate(view === 'dashboard' || $('nav-' + view) ? view : defaultView());
@@ -804,6 +808,7 @@ function defaultView() {
   if (hasRole(ROLES.CLERK2)) return 'clerk2';
   if (hasRole(ROLES.STATION_CLERK1)) return 'station';
   if (hasRole(ROLES.STATION_CLERK2)) return 'ap';
+  if (hasRole(ROLES.APPROVER)) return 'approve';
   return 'dashboard';
 }
 function buildNav() {
@@ -812,7 +817,8 @@ function buildNav() {
   if (hasRole(ROLES.CLERK1)) items.push({ id: 'clerk1', ico: '🧾', label: 'เสมียน 1' });
   if (hasRole(ROLES.CLERK2)) items.push({ id: 'clerk2', ico: '🔍', label: 'เสมียน 2' });
   if (hasRole(ROLES.STATION_CLERK1)) items.push({ id: 'station', ico: '⛽', label: 'ปั๊ม' });
-  if (hasRole(ROLES.STATION_CLERK2)) items.push({ id: 'ap', ico: '🏢', label: 'บัญชีน้ำมัน' }); // เสมียนปั๊ม 2 (สำนักงานใหญ่) — ชื่อเมนูไม่ใช้ศัพท์ตาราง fuel_ap (ผู้ใช้ขอ 14 ก.ย. 2569)
+  if (hasRole(ROLES.STATION_CLERK2)) items.push({ id: 'ap', ico: '🏢', label: 'บัญชีน้ำมัน' });
+  if (hasRole(ROLES.APPROVER)) items.push({ id: 'approve', ico: '✍️', label: 'อนุมัติใบสั่ง' }); // เสมียนปั๊ม 2 (สำนักงานใหญ่) — ชื่อเมนูไม่ใช้ศัพท์ตาราง fuel_ap (ผู้ใช้ขอ 14 ก.ย. 2569)
   items.push({ id: 'dashboard', ico: '📊', label: 'ภาพรวม' });
   var nav = $('nav');
   nav.innerHTML = items.map(function (it) {
@@ -831,6 +837,7 @@ function navigate(view, fromNav) {
   else if (view === 'clerk2') renderClerk2();
   else if (view === 'station') renderStation();
   else if (view === 'ap') renderAp();
+  else if (view === 'approve') renderApprove();
   else renderDashboard();
 }
 
@@ -923,6 +930,10 @@ function driverOrderButtons(o) {
   if (st === 'รอออกใบสั่ง') {
     return '<div class="muted" style="margin-top:8px">รอเสมียน 1 ออกใบสั่ง…</div>' +
       '<button class="btn-danger btn-small" onclick="doCancelOrder(\'' + id + '\')">ยกเลิกคำขอ</button>';
+  }
+  if (st === 'รอผู้อนุมัติ') {
+    return '<div class="muted" style="margin-top:8px">✍️ เสมียน 1 ออกใบสั่งแล้ว รอผู้อนุมัติ — จะแจ้งทาง LINE เมื่ออนุมัติ แล้วจึงไปรับน้ำมันได้</div>' +
+      '<button class="btn-danger btn-small" onclick="doCancelOrder(\'' + id + '\')">ยกเลิกใบสั่ง</button>';
   }
   if (st === 'ออกใบสั่งแล้ว รอรับน้ำมัน') {
     return '<button class="btn-primary" onclick="renderLoadForm(\'' + id + '\')">🚛 บันทึกรับน้ำมันเข้าถัง</button>' +
@@ -1774,7 +1785,7 @@ function doIssueOrder(orderId) {
   var patch = { qtyIssued: $('f-qty').value, pickupPlace: $('f-place').value, fuel: $('f-fuel').value, note: $('f-note').value };
   busy(true);
   callServer('issueOrder', CURRENT_USER.userId, orderId, patch)
-    .then(function () { busy(false); showToast('ออกใบสั่งแล้ว'); renderClerk1(); })
+    .then(function (d) { busy(false); showToast(d && d.pendingApproval ? 'ออกใบสั่งแล้ว — ส่งให้ผู้อนุมัติ' : 'ออกใบสั่งแล้ว'); renderClerk1(); })
     .catch(errToast);
 }
 function renderReviewDetail(orderId) {
@@ -2182,6 +2193,72 @@ function doMarkAp() {
   busy(true);
   callServer('markApRecorded', CURRENT_USER.userId, ids, $('ap-docno').value.trim())
     .then(function (d) { busy(false); showToast('บันทึกแล้ว ' + d.recorded.length + ' ใบ'); renderAp('pending'); })
+    .catch(errToast);
+}
+
+/* ================================ ผู้อนุมัติ (เจ้านาย) ================================
+   แทนการที่เสมียน 1 พิมพ์ใบสั่งกระดาษไปให้เซ็น (14 ก.ย. 2569): เสมียน 1 ออกใบสั่ง -> "รอผู้อนุมัติ" ->
+   เจ้านายกดอนุมัติในแอป -> ใบสั่งถึงมือคนขับ (LINE) จึงไปรับน้ำมันที่ปั๊มได้ | ไม่อนุมัติ -> กลับไปคิวเสมียน 1 พร้อมเหตุผล */
+function approveTabs(active) {
+  return '<div class="tabbar">' +
+    ['pending|✍️ รออนุมัติ', 'history|🕘 ประวัติ'].map(function (t) {
+      var p = t.split('|');
+      return '<button class="' + (active === p[0] ? 'active' : '') + '" onclick="renderApprove(\'' + p[0] + '\')">' + p[1] + '</button>';
+    }).join('') + '</div>';
+}
+function renderApprove(tab) {
+  tab = tab || 'pending';
+  busy(true);
+  var AP = screenData_('approve'); // รออนุมัติ + ประวัติ ในคำขอเดียว
+  if (tab === 'pending') {
+    AP.then(function (d) { return d.pending; }).then(function (orders) {
+      busy(false);
+      var html = approveTabs(tab);
+      if (!orders.length) html += '<div class="empty">ไม่มีใบสั่งรออนุมัติ 🎉</div>';
+      orders.forEach(function (o) {
+        html += '<div class="card"><h3>📋 ' + esc(o['Order ID']) + ' ' + statusChip(o['สถานะ']) + '</h3>' +
+          '<div class="row">👤 คนขับ: <b>' + esc(o['คนขับรถน้ำมัน']) + '</b> | 🚛 ' + esc(o['รถน้ำมัน']) + '</div>' +
+          '<div class="row">🛢 ' + esc(o['ชนิดน้ำมัน']) + ' — สั่งจ่าย <b class="big">' + esc(o['จำนวนลิตรที่สั่งจ่าย']) + ' ลิตร</b>' +
+          (o['จำนวนลิตรที่ขอ'] && o['จำนวนลิตรที่ขอ'] !== o['จำนวนลิตรที่สั่งจ่าย'] ? ' <span class="muted">(คนขับขอ ' + esc(o['จำนวนลิตรที่ขอ']) + ')</span>' : '') + '</div>' +
+          (o['สถานที่รับน้ำมัน'] ? '<div class="row">📍 รับที่: ' + esc(o['สถานที่รับน้ำมัน']) + '</div>' : '') +
+          '<div class="row muted">🧾 ออกใบสั่งโดย ' + esc(o['ผู้ออกใบสั่ง']) + ' ' + esc(o['เวลาออกใบสั่ง']) + ' | ขอเมื่อ ' + esc(o['วันที่ขอ']) + '</div>' +
+          (o['หมายเหตุ'] ? '<div class="row muted">📝 ' + esc(o['หมายเหตุ']) + '</div>' : '') +
+          '<button class="btn-primary" onclick="doApproveOrder(\'' + esc(o['Order ID']) + '\')">✅ อนุมัติ — ส่งใบสั่งให้คนขับ</button>' +
+          '<button class="btn-danger btn-small" onclick="doRejectOrder(\'' + esc(o['Order ID']) + '\')">⛔ ไม่อนุมัติ (ส่งกลับเสมียน 1)</button></div>';
+      });
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  } else {
+    AP.then(function (d) { return d.history; }).then(function (rows) {
+      busy(false);
+      var html = approveTabs(tab);
+      if (!rows.length) html += '<div class="empty">ยังไม่มีประวัติ</div>';
+      else html += '<div class="card"><div class="tablewrap"><table><tr><th>ใบสั่ง</th><th>คนขับ / รถ</th><th>น้ำมัน</th><th>ลิตร</th><th>ผลการอนุมัติ</th><th>สถานะตอนนี้</th></tr>' +
+        rows.map(function (o) {
+          var rejected = /ไม่อนุมัติ/.test(o['ผู้อนุมัติ'] || '');
+          return '<tr><td>' + esc(o['Order ID']) + '<br><span class="muted">' + esc(o['เวลาออกใบสั่ง']) + '</span></td>' +
+            '<td>' + esc(o['คนขับรถน้ำมัน']) + '<br><span class="muted">' + esc(o['รถน้ำมัน']) + '</span></td>' +
+            '<td>' + esc(o['ชนิดน้ำมัน']) + '</td><td style="text-align:right">' + esc(o['จำนวนลิตรที่สั่งจ่าย']) + '</td>' +
+            '<td' + (rejected ? ' style="color:var(--c-danger)"' : '') + '>' + esc(o['ผู้อนุมัติ']) + '<br><span class="muted">' + esc(o['เวลาอนุมัติ']) + '</span></td>' +
+            '<td>' + statusChip(o['สถานะ']) + '</td></tr>';
+        }).join('') + '</table></div></div>';
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  }
+}
+function doApproveOrder(orderId) {
+  if (!confirm('อนุมัติใบสั่ง ' + orderId + ' ?\nระบบจะส่งใบสั่งให้คนขับทาง LINE ทันที')) return;
+  busy(true);
+  callServer('approveOrder', CURRENT_USER.userId, orderId)
+    .then(function () { busy(false); showToast('อนุมัติแล้ว — ส่งให้คนขับแล้ว'); renderApprove('pending'); })
+    .catch(errToast);
+}
+function doRejectOrder(orderId) {
+  var reason = prompt('เหตุผลที่ไม่อนุมัติ (เสมียน 1 และคนขับจะเห็นข้อความนี้)');
+  if (reason == null) return;
+  busy(true);
+  callServer('rejectOrder', CURRENT_USER.userId, orderId, reason)
+    .then(function () { busy(false); showToast('ส่งกลับเสมียน 1 แล้ว'); renderApprove('pending'); })
     .catch(errToast);
 }
 
