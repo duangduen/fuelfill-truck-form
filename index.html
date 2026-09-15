@@ -183,6 +183,7 @@ var REQUIRE_FILL_PHOTO = true;        // บังคับรูปเครื
 var DEFAULT_PO_LOCATION_CODE = '10401'; // สถานที่รับน้ำมันที่ใช้บ่อยที่สุด (fuel_po_location.code)
 
 var CURRENT_USER = null; // {userId, name, roles:[...], defaultTank}
+var REQUIRE_APPROVAL = true; // ใบสั่งต้องผ่านผู้อนุมัติก่อนถึงคนขับ (ค่าจริงมาจาก whoAmI/bootstrap)
 var MASTERS = { machines: [], sites: [], fuels: [], tanks: [], poLocations: [], receivers: [] };
 var ROLES = { DRIVER: 'คนขับรถน้ำมัน', CLERK1: 'เสมียน1', CLERK2: 'เสมียน2',
   STATION_CLERK1: 'เสมียนปั๊ม1', STATION_CLERK2: 'เสมียนปั๊ม2', APPROVER: 'ผู้อนุมัติ', ADMIN: 'ผู้ดูแล' };
@@ -211,7 +212,11 @@ function jsonpRequest(qs) {
  * postMessage จากข้างในจึงไปไม่ถึงแอป -> รอจนหมดเวลา 60 วิ ทุกครั้งทั้งที่เซิร์ฟเวอร์บันทึกเสร็จแล้ว
  * (อาการจริง: "ข้อมูลเข้าชีตแต่ขึ้น error" 3 ก.ย. และ "หมดเวลา" 12 ก.ย.)
  * XHR ใช้ Content-Type text/plain = "simple request" ไม่มี preflight ที่ Apps Script ไม่รองรับ
- * ได้ทั้งคำตอบทันที และ % อัปโหลดจริงจาก xhr.upload.onprogress
+ *
+ * ⚠ ห้ามผูก xhr.upload.onprogress (15 ก.ย. 2569): ตามสเปก XHR การมี upload listener ทำให้คำขอต้องผ่าน
+ *   CORS preflight (OPTIONS) — Chrome ไม่ทำ แต่ Safari/WebKit (LINE บน iPhone) ทำตามสเปก -> Apps Script ตอบ OPTIONS
+ *   ไม่ได้ -> XHR ล้ม -> ถอยไป hidden-iframe ที่ช้าและไม่มี progress (อาการจริง: ค้าง "0%" นาน)
+ *   จึงแสดงเวลาที่ผ่านไปแทน % (onProgress รับ {elapsed: วินาที})
  */
 function xhrPostRequest(fields, onProgress) {
   return new Promise(function (resolve, reject) {
@@ -219,11 +224,14 @@ function xhrPostRequest(fields, onProgress) {
     xhr.open('POST', API_URL, true);
     xhr.timeout = 90000;
     xhr.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
-    if (xhr.upload && onProgress) {
-      xhr.upload.onprogress = function (e) { if (e.lengthComputable) onProgress(e.loaded / e.total); };
-      xhr.upload.onload = function () { onProgress(1); };
+    var t0 = Date.now(), ticker = null;
+    if (onProgress) {
+      onProgress({ elapsed: 0 });
+      ticker = setInterval(function () { onProgress({ elapsed: Math.round((Date.now() - t0) / 1000) }); }, 1000);
     }
+    var stop = function () { if (ticker) clearInterval(ticker); };
     xhr.onload = function () {
+      stop();
       var txt = xhr.responseText || '';
       try { resolve(JSON.parse(txt)); }
       catch (e) {
@@ -232,8 +240,8 @@ function xhrPostRequest(fields, onProgress) {
         reject(err);
       }
     };
-    xhr.onerror = function () { var err = new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้'); err.transport = true; reject(err); };
-    xhr.ontimeout = function () { reject(new Error('ส่งข้อมูลไม่สำเร็จ (หมดเวลา 90 วินาที)')); };
+    xhr.onerror = function () { stop(); var err = new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้'); err.transport = true; reject(err); };
+    xhr.ontimeout = function () { stop(); reject(new Error('ส่งข้อมูลไม่สำเร็จ (หมดเวลา 90 วินาที)')); };
     xhr.send(JSON.stringify(fields));
   });
 }
@@ -285,6 +293,7 @@ var GET_ACTION_ARGS = {
   dashboard: ['userId'],
   // ผู้อนุมัติ (เจ้านาย) — อนุมัติใบสั่งก่อนถึงมือคนขับ
   pendingApproval: ['userId'], approvalHistory: ['userId'], approveOrder: ['userId', 'orderId'], rejectOrder: ['userId', 'orderId', 'reason'],
+  remindApproval: ['userId', 'orderId'],
   requestOrder: ['userId', 'payload'],
   cancelOrder: ['userId', 'orderId', 'reason'],
   issueOrder: ['userId', 'orderId', 'patch'],
@@ -346,7 +355,7 @@ function callServer(fnName) {
       if (v != null && typeof v === 'object') v = JSON.stringify(v);
       fields[k] = v == null ? '' : v;
     });
-    // ทางหลัก XHR (รู้ผลทันที + มี % อัปโหลด) -> ถ้าถูกบล็อกระดับเครือข่าย/CORS ค่อยถอยไป hidden-iframe แบบเดิม
+    // ทางหลัก XHR (รู้ผลทันที) -> ถ้าถูกบล็อกระดับเครือข่าย/CORS ค่อยถอยไป hidden-iframe แบบเดิม
     return xhrPostRequest(fields, window.__uploadProgress).then(unwrap, function (err) {
       if (!err.transport) throw err;
       return formPostRequest(fields).then(unwrap);
@@ -647,6 +656,7 @@ function enterApp_(userId, me) {
     return false;
   }
   CURRENT_USER = { userId: userId, name: me.name, roles: me.roles, defaultTank: me.defaultTank || '' };
+  REQUIRE_APPROVAL = me.requireApproval !== false; // เซิร์ฟเวอร์บอกว่าใบสั่งต้องผ่านผู้อนุมัติไหม (ข้อความปุ่ม/คำอธิบาย)
   $('who').innerHTML = esc(me.name) + '<br>' + esc(me.roles.join(', '));
   buildNav();
   return true;
@@ -698,8 +708,8 @@ function legacyScreen_(name, p) {
     case 'eod': return Promise.all([C('myOrders', u), C('fillsOfOrder', u, p.orderId)]).then(function (r) { return { orders: r[0], fills: r[1] }; });
     case 'fills': return C('fillsOfOrder', u, p.orderId).then(function (f) { return { fills: f }; });
     case 'clerk1':
-      return Promise.all([C('pendingIssue', u), C('pendingReview', u), C('activeOrders', u), C('importFailed', u)])
-        .then(function (r) { return { pendingIssue: r[0], pendingReview: r[1], activeOrders: r[2], importFailed: r[3] }; });
+      return Promise.all([C('pendingIssue', u), C('pendingReview', u), C('activeOrders', u), C('importFailed', u), safe(C('pendingApproval', u), []), safe(C('orderHistory', u), [])])
+        .then(function (r) { return { pendingIssue: r[0], pendingReview: r[1], activeOrders: r[2], importFailed: r[3], pendingApproval: r[4], history: r[5] }; });
     case 'clerk2':
       return Promise.all([C('importedPendingAudit', u), C('importFailed', u)]).then(function (r) { return { importedPendingAudit: r[0], importFailed: r[1] }; });
     case 'station':
@@ -955,7 +965,12 @@ function doCancelOrder(orderId) {
   var reason = prompt('เหตุผลที่ยกเลิก (ไม่บังคับ)') || '';
   busy(true);
   callServer('cancelOrder', CURRENT_USER.userId, orderId, reason)
-    .then(function () { busy(false); showToast('ยกเลิกแล้ว'); renderDriverHome(); })
+    .then(function () {
+      busy(false); showToast('ยกเลิกแล้ว');
+      // กลับหน้าที่กดมา: เสมียน 1 ยกเลิกจากหน้าตัวเอง ไม่ใช่หน้าคนขับ
+      var active = document.querySelector('nav button.active');
+      if (active && active.id === 'nav-clerk1') renderClerk1('active'); else renderDriverHome();
+    })
     .catch(errToast);
 }
 
@@ -1145,15 +1160,15 @@ function doAddReceipt(orderId) {
   busy(true, 'กำลังย่อรูปใบเสร็จ…');
   compressPhoto($('rc-photo').files[0]).then(function (photo) {
     if (!photo) throw new Error('อ่านรูปไม่ได้ ลองถ่ายใหม่');
-    busy(true, 'กำลังอัปโหลดใบเสร็จ… 0%\nไม่ต้องกดซ้ำ');
+    busy(true, 'กำลังส่งใบเสร็จ…\nไม่ต้องกดซ้ำ');
     window.__uploadProgress = function (p) {
-      busy(true, p >= 1 ? 'อัปโหลดเสร็จ ✓ เซิร์ฟเวอร์กำลังบันทึก…' : 'กำลังอัปโหลดใบเสร็จ… ' + Math.round(p * 100) + '%\nไม่ต้องกดซ้ำ');
+      busy(true, 'กำลังส่งใบเสร็จและบันทึก… ' + (p.elapsed || 0) + ' วิ\nไม่ต้องกดซ้ำ (ปกติ 3–8 วินาที)');
     };
     return callServer('addReceipt', CURRENT_USER.userId, orderId,
       { liters: liters, receiptNo: $('rc-no').value.trim(), clientKey: CURRENT_RECEIPT_KEY }, photo);
   }).then(function (r) {
     window.__uploadProgress = null;
-    finishReceipt_(orderId, r && r.duplicate);
+    finishReceipt_(orderId, r && r.duplicate, r && r.list);
   }).catch(function (err) {
     window.__uploadProgress = null;
     // เช็คก่อนว่าใบเสร็จเข้าไปแล้วหรือยัง (เน็ตช้าจนหมดเวลา แต่เซิร์ฟเวอร์บันทึกสำเร็จ)
@@ -1171,10 +1186,11 @@ function doAddReceipt(orderId) {
     });
   });
 }
-function finishReceipt_(orderId, wasDuplicate) {
+function finishReceipt_(orderId, wasDuplicate, list) {
   CURRENT_RECEIPT_KEY = newClientKey(); // ใบถัดไปใช้กุญแจใหม่
+  // เซิร์ฟเวอร์แนบรายการใบเสร็จมากับผลบันทึกแล้ว (list) — ไม่ต้องยิงขอใหม่อีก 1 รอบ; ยิงเฉพาะกรณีเซิร์ฟเวอร์เก่า
   busy(true, 'กำลังโหลดรายการใบเสร็จ…');
-  callServer('receiptsOfOrder', CURRENT_USER.userId, orderId).then(function (d) {
+  (list ? Promise.resolve(list) : callServer('receiptsOfOrder', CURRENT_USER.userId, orderId)).then(function (d) {
     lockSubmit('btn-save-receipt', false, '💾 บันทึกใบเสร็จนี้');
     busy(false);
     toggleReceiptAdd(false);
@@ -1189,8 +1205,8 @@ function finishReceipt_(orderId, wasDuplicate) {
 function doCancelReceipt(receiptId) {
   if (!confirm('ลบใบเสร็จ ' + receiptId + ' ?')) return;
   busy(true);
-  callServer('cancelReceipt', CURRENT_USER.userId, receiptId, '').then(function () {
-    return callServer('receiptsOfOrder', CURRENT_USER.userId, LOAD_ORDER['Order ID']);
+  callServer('cancelReceipt', CURRENT_USER.userId, receiptId, '').then(function (r) {
+    return (r && r.list) ? r.list : callServer('receiptsOfOrder', CURRENT_USER.userId, LOAD_ORDER['Order ID']);
   }).then(function (d) { busy(false); renderReceiptList(d); showToast('ลบแล้ว'); }).catch(errToast);
 }
 function calcLoad() {
@@ -1431,9 +1447,9 @@ function doSubmitFill(orderId) {
   var hasPhoto = !!$('f-photo').files[0];
   Promise.all([compressPhoto($('f-photo').files[0]), compressPhoto($('f-photo2').files[0])]).then(function (ph) {
     if (hasPhoto && !ph[0]) throw new Error('อ่านรูปเครื่องจักรไม่ได้ ลองถ่ายใหม่');
-    busy(true, hasPhoto ? 'กำลังอัปโหลดรูป… 0%\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ' : 'กำลังส่งข้อมูล…');
+    busy(true, hasPhoto ? 'กำลังส่งรูปและบันทึก…\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ' : 'กำลังส่งข้อมูล…');
     window.__uploadProgress = function (p) {
-      busy(true, p >= 1 ? 'อัปโหลดรูปเสร็จ ✓ เซิร์ฟเวอร์กำลังบันทึก…\n(ปกติ 5–15 วินาที)' : 'กำลังอัปโหลดรูป… ' + Math.round(p * 100) + '%\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ');
+      busy(true, 'กำลังส่งรูปและบันทึก… ' + (p.elapsed || 0) + ' วิ\nอย่าปิดหน้านี้ และไม่ต้องกดซ้ำ (ปกติ 5–15 วินาที)');
     };
     return callServer('submitFill', CURRENT_USER.userId, payload, ph[0], ph[1]);
   }).then(function (d) {
@@ -1682,9 +1698,11 @@ function renderClerk1(tab) {
   tab = tab || 'issue';
   var tabs = '<div class="tabbar">' +
     '<button class="' + (tab === 'issue' ? 'active' : '') + '" onclick="renderClerk1(\'issue\')">🧾 รอออกใบสั่ง</button>' +
+    (REQUIRE_APPROVAL ? '<button class="' + (tab === 'approval' ? 'active' : '') + '" onclick="renderClerk1(\'approval\')">✍️ รออนุมัติ</button>' : '') +
     '<button class="' + (tab === 'review' ? 'active' : '') + '" onclick="renderClerk1(\'review\')">📮 รอตรวจรายงาน</button>' +
     '<button class="' + (tab === 'active' ? 'active' : '') + '" onclick="renderClerk1(\'active\')">🚛 กำลังทำงาน</button>' +
     '<button class="' + (tab === 'failed' ? 'active' : '') + '" onclick="renderClerk1(\'failed\')">❌ นำเข้าไม่สำเร็จ</button>' +
+    '<button class="' + (tab === 'history' ? 'active' : '') + '" onclick="renderClerk1(\'history\')">🕘 ประวัติ</button>' +
     '</div>';
   busy(true);
   // ข้อมูลทั้ง 4 แท็บมาในคำขอเดียว (screen clerk1) — สลับแท็บไม่ต้องรอเซิร์ฟเวอร์
@@ -1701,6 +1719,39 @@ function renderClerk1(tab) {
           '<div class="row muted">' + esc(o['วันที่ขอ']) + (o['หมายเหตุ'] ? ' | ' + esc(o['หมายเหตุ']) : '') + '</div>' +
           '<button class="btn-primary" onclick="renderIssueForm(\'' + esc(o['Order ID']) + '\')">ออกใบสั่ง</button></div>';
       });
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  } else if (tab === 'approval') {
+    // ใบที่ออกแล้วรอเจ้านายอนุมัติ — เสมียน 1 ใช้ตามผู้อนุมัติ (กด "ตามผู้อนุมัติ" = ส่ง LINE/Telegram เตือนซ้ำ)
+    C1.then(function (d) { return d.pendingApproval || []; }).then(function (orders) {
+      busy(false);
+      var html = tabs;
+      if (!orders.length) html += '<div class="empty">ไม่มีใบสั่งค้างอนุมัติ 🎉</div>';
+      orders.forEach(function (o) {
+        html += '<div class="card"><h3>📋 ' + esc(o['Order ID']) + ' ' + statusChip(o['สถานะ']) + '</h3>' +
+          '<div class="row">👤 ' + esc(o['คนขับรถน้ำมัน']) + ' | 🚛 ' + esc(o['รถน้ำมัน']) + '</div>' +
+          '<div class="row">🛢 ' + esc(o['ชนิดน้ำมัน']) + ' — สั่งจ่าย <b>' + esc(o['จำนวนลิตรที่สั่งจ่าย']) + ' ล.</b>' + (o['สถานที่รับน้ำมัน'] ? ' | 📍 ' + esc(o['สถานที่รับน้ำมัน']) : '') + '</div>' +
+          '<div class="row muted">ออกใบสั่งเมื่อ ' + esc(o['เวลาออกใบสั่ง']) + ' โดย ' + esc(o['ผู้ออกใบสั่ง']) + ' — รอผู้อนุมัติกดอนุมัติในแอป</div>' +
+          '<button class="btn-secondary btn-small" onclick="doRemindApproval(\'' + esc(o['Order ID']) + '\')">🔔 ตามผู้อนุมัติ (ส่งเตือนซ้ำ)</button>' +
+          '<button class="btn-danger btn-small" onclick="doCancelOrder(\'' + esc(o['Order ID']) + '\')">ยกเลิกใบสั่ง</button></div>';
+      });
+      $('main').innerHTML = html;
+    }).catch(errBack);
+  } else if (tab === 'history') {
+    C1.then(function (d) { return d.history || []; }).then(function (orders) {
+      busy(false);
+      var html = tabs;
+      if (!orders.length) html += '<div class="empty">ยังไม่มีประวัติ</div>';
+      else html += '<div class="card"><div class="muted">ใบสั่งย้อนหลัง 100 ใบล่าสุด (ทุกสถานะ)</div><div class="tablewrap" style="margin-top:8px"><table>' +
+        '<tr><th>ใบสั่ง</th><th>คนขับ / รถ</th><th>น้ำมัน</th><th>ลิตร</th><th>สถานะ</th><th>ผู้อนุมัติ</th><th></th></tr>' +
+        orders.map(function (o) {
+          return '<tr><td>' + esc(o['Order ID']) + '<br><span class="muted">' + esc(o['วันที่ขอ']) + '</span></td>' +
+            '<td>' + esc(o['คนขับรถน้ำมัน']) + '<br><span class="muted">' + esc(o['รถน้ำมัน']) + '</span></td>' +
+            '<td>' + esc(o['ชนิดน้ำมัน']) + '</td><td style="text-align:right">' + esc(o['จำนวนลิตรที่สั่งจ่าย'] || o['จำนวนลิตรที่ขอ']) +
+            (o['รวมลิตรจ่าย'] ? '<br><span class="muted">จ่าย ' + esc(o['รวมลิตรจ่าย']) + '</span>' : '') + '</td>' +
+            '<td>' + statusChip(o['สถานะ']) + '</td><td>' + esc(o['ผู้อนุมัติ'] || '-') + (o['เวลาอนุมัติ'] ? '<br><span class="muted">' + esc(o['เวลาอนุมัติ']) + '</span>' : '') + '</td>' +
+            '<td><button class="btn-secondary btn-small" onclick="renderOrderFills(\'' + esc(o['Order ID']) + '\', \'clerk1\')">รายการจ่าย</button></td></tr>';
+        }).join('') + '</table></div></div>';
       $('main').innerHTML = html;
     }).catch(errBack);
   } else if (tab === 'review') {
@@ -1750,6 +1801,12 @@ function renderClerk1(tab) {
     }).catch(errBack);
   }
 }
+function doRemindApproval(orderId) {
+  busy(true);
+  callServer('remindApproval', CURRENT_USER.userId, orderId)
+    .then(function (d) { busy(false); showToast('ส่งเตือนผู้อนุมัติแล้ว (' + d.notified + ' คน)'); renderClerk1('approval'); })
+    .catch(errToast);
+}
 function renderIssueForm(orderId) {
   ensureMasters(['fuels', 'poLocations']).then(function () { renderIssueForm_(orderId); }).catch(errBack);
 }
@@ -1777,7 +1834,7 @@ function renderIssueForm_(orderId) {
         searchPlaceholder: 'พิมพ์ชื่อสาขาหรือรหัส…', clearable: true
       }) +
       '<label>หมายเหตุ <span class="opt">(ไม่บังคับ)</span></label><input id="f-note">' +
-      '<button class="btn-primary" onclick="doIssueOrder(\'' + esc(orderId) + '\')">ออกใบสั่ง + แจ้งคนขับ</button>' +
+      '<button class="btn-primary" onclick="doIssueOrder(\'' + esc(orderId) + '\')">' + (REQUIRE_APPROVAL ? '✍️ ออกใบสั่ง + ส่งผู้อนุมัติ' : 'ออกใบสั่ง + แจ้งคนขับ') + '</button>' +
       '<button class="btn-secondary" onclick="renderClerk1()">ย้อนกลับ</button></div>';
   }).catch(errBack);
 }
